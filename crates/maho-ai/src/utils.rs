@@ -56,6 +56,7 @@ pub mod secret_classifier;
 pub mod secret_lexer;
 pub mod secret_redaction;
 pub mod server_fallback_receipt;
+pub mod siwc_errors;
 pub mod sleep;
 pub mod stop_details;
 pub mod text;

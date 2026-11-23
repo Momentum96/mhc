@@ -21,6 +21,7 @@ pub mod meta;
 pub mod oauth_page;
 pub mod openai_chatgpt;
 pub mod openai_chatgpt_model_catalog;
+pub mod openai_id_token;
 pub mod openrouter;
 pub mod pkce;
 pub mod radius;
