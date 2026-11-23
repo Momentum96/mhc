@@ -638,6 +638,25 @@ impl TerminalManifestWriter {
         }
         self.persist(now).await;
     }
+    /// Graceful close (`oh-my-openagent#14313`): the session ended on request, so monitors and
+    /// background jobs stop for good and the manifest file is removed.
+    pub async fn record_closed(&mut self) {
+        self.pending.clear();
+        self.pending_rpc
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+        self.entries.clear();
+        self.backgrounds.clear();
+        self.store.clear();
+        match tokio::fs::remove_file(self.store.file_path()).await {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                self.persist_failure = Some(SidecarError::Io(error.to_string()));
+            }
+        }
+    }
     pub async fn record_background_start(
         &mut self,
         id: &str,
@@ -1463,5 +1482,19 @@ mod debounce_tests {
             state.monitors[0].last_checkpoint.as_ref().unwrap().size,
             2.0
         );
+    }
+
+    #[tokio::test]
+    async fn record_closed_clears_state_and_removes_manifest_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut writer = TerminalManifestWriter::new(dir.path(), "s");
+        let file = writer.store.file_path().to_owned();
+        writer
+            .record_background_start("bash_1", "sleep 10", 1.0, 2.0)
+            .await;
+        assert!(std::path::Path::new(&file).exists());
+        writer.record_closed().await;
+        assert!(!std::path::Path::new(&file).exists());
+        assert!(writer.store.read().await.expect("read").is_none());
     }
 }
