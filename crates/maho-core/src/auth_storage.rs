@@ -1133,11 +1133,28 @@ impl AuthStorage {
         Ok((migrated, repaired_flag, migrated_flag))
     }
 
+    /// The load seam of senpi `parseStorageContent`: after repair and the key migration, Claude logins of the
+    /// retired sign-in are signed out (`signOutLegacyClaudeLogins`); mutation paths read without that step.
+    fn parse_storage_load(
+        content: Option<&str>,
+    ) -> Result<(AuthStorageData, bool, bool, Option<String>), String> {
+        let (data, repaired, migrated) = Self::parse_storage_content(content)?;
+        let moved = crate::anthropic_legacy_sign_out::sign_out_legacy_claude_logins(&data);
+        Ok((
+            moved.data,
+            repaired,
+            migrated || moved.migrated,
+            moved.skipped,
+        ))
+    }
+
     /// Reload credentials from storage; a written repair or migration invalidates the revision.
     pub fn reload(&mut self) {
+        let mut skipped = None;
         let result: Result<(AuthStorageData, bool, bool), String> = match &self.storage {
             AuthStorageBackend::File(backend) => backend.with_lock(|current| {
-                let (data, repaired, migrated) = Self::parse_storage_content(current)?;
+                let (data, repaired, migrated, moved_skip) = Self::parse_storage_load(current)?;
+                skipped = moved_skip;
                 if migrated {
                     backup_auth_file(self.auth_path.as_deref(), current);
                 }
@@ -1151,10 +1168,23 @@ impl AuthStorage {
                 }
             }),
             AuthStorageBackend::InMemory(backend) => backend.with_lock(|current| {
-                let (data, repaired, migrated) = Self::parse_storage_content(current)?;
+                let (data, repaired, migrated, moved_skip) = Self::parse_storage_load(current)?;
+                skipped = moved_skip;
                 Ok(((data, repaired, migrated), None))
             }),
         };
+        if let Some(reason) = skipped {
+            let message = format!(
+                "A Claude login in auth.json was left unchanged because {reason}. Claude logins from the old sign-in are no longer used; sign in again with Claude: run /login anthropic-subscription."
+            );
+            let mut errors = self
+                .errors
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if !errors.contains(&message) {
+                errors.push(message);
+            }
+        }
         match result {
             Ok((data, _, _)) => {
                 *Self::lock_set(&self.notices) = unused_login_notices(&data);

@@ -18,6 +18,7 @@
 //!   settings_public_types, settings_overrides, terminal_settings, compaction_settings_access,
 //!   compaction_settings_resolver, http_dispatcher, and the rest of the senpi core tree.
 
+pub mod anthropic_legacy_sign_out;
 pub mod auth_credential_values;
 pub mod auth_guidance;
 pub mod auth_providers;
