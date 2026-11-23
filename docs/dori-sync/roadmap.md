@@ -83,7 +83,7 @@ porting). Cost note from 2026-11-22: each of the four compatibility fixes took o
 |---|---|---|---|---|---|
 | P0 | Stabilization: O09 catalog (claude-fable-5-2), intermittent child failures | S | - | done 2026-11-22 | doctor 10/10, DAG 5/5 |
 | P1 | O07 LSP ledger, O06 ultrawork, O08 MCP timeouts/SSE, O16 js-kernel-guard, rest of O09 | S each | P0 | done 2026-11-23 (merged into `dori/compat-20261122`) | each group's TS diff ported, gates green |
-| P2 | S07 ai (remove Anthropic OAuth paths, SIWC hardening, per-account catalog), rest of S08 (CLI `/login`, logout, account management, `recheckedAccounts`, `persistBlocks`) | M + M | P0 | in progress: code committed 2026-11-23 (71a92eeaf); the live ChatGPT smoke and the 5-run DAG are still to do, see status-2026-11-23.md | Claude and ChatGPT accounts can be added, removed and fail over inside mhc |
+| P2 | S07 ai (remove Anthropic OAuth paths, SIWC hardening, per-account catalog), rest of S08 (CLI `/login`, logout, account management, `recheckedAccounts`, `persistBlocks`) | M + M | P0 | done 2026-11-23 (merged into `dori/compat-20261122`) | Claude and ChatGPT accounts can be added, removed and fail over inside mhc |
 | P3 | S09 tools core split + machine-ops crate | L | P2 | not started | bash/read/edit/write on the `*-core` split, machine-ops crate exists |
 | P4 | S05 + S16 kill-guard | L | P3 | not started | `kill`/`pkill`/`killall` against a protected process is refused, own processes still killable |
 | P5 | S12 terminal (background reporting, auto-reap, interrupt stops jobs) | M | P3 | not started | monitor and bash session behavior matches omo 5.1.81 |
