@@ -5263,6 +5263,7 @@ dependencies = [
  "indexmap",
  "libc",
  "maho-ai",
+ "maho-codemode",
  "maho-ext-api",
  "maho-ext-mcp",
  "maho-memory-core",

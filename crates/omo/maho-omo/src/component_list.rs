@@ -278,6 +278,10 @@ pub fn omo_components(
         },
     ));
     components.push(component(
+        "js-kernel-guard",
+        crate::js_kernel_guard::JsKernelGuardComponent,
+    ));
+    components.push(component(
         "question-gates",
         maho_omo_question_gates::create_question_gates_component(),
     ));
@@ -441,6 +445,7 @@ pub fn omo_component_names() -> Vec<&'static str> {
         "skill-pointers",
         "ulw-execute-continuation",
         "ulw-loop",
+        "js-kernel-guard",
         "question-gates",
         "claim-receipt",
         "git-master",
