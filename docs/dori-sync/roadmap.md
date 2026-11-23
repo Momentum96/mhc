@@ -12,8 +12,10 @@ cost before starting the next.
 
 | Item | Location |
 |---|---|
-| Fork, branch with Dori fixes | `Momentum96/mhc`, `dori/compat-20261122` (checkout `/Volumes/Work/mac_work/mhc`) |
-| Upstream sources (full clones) | `/Volumes/Work/mac_work/upstream/{senpi,oh-my-openagent,omowright}` |
+| Build host | omarchy (Linux x86_64). Since 2026-11-23 every mhc build, test and smoke runs there under `~/work`, not on macmini |
+| Fork, branch with Dori fixes | `Momentum96/mhc`, `dori/compat-20261122` (checkout `~/work/mhc` on omarchy) |
+| Upstream sources (full clones) | `~/work/upstream/{senpi,oh-my-openagent}` on omarchy |
+| Pinned senpi checkout | `~/work/upstream/senpi-pin` (worktree of `~/work/upstream/senpi` at the PINS.md pin, with `bun install --frozen-lockfile`); export `SENPI_SRC=$HOME/work/upstream/senpi-pin` for every test run |
 | Target versions | omo `v5.1.81` with senpi `v2026.11.19-5`; `scripts/dori/sync-detect.sh` prints the current range |
 | Isolated runs | `scripts/dori/mhc-dori.sh` (shadow HOME `~/.maho/home`, `MHC_BIN` selects the binary) |
 | Packaged build | `dist/mhc` (local only, excluded via `.git/info/exclude`) |
@@ -27,21 +29,35 @@ cost before starting the next.
    Do not move the PINS.md pins inside a package: the pin moves once, after every HIGH package of a release is
    in (`backlog.md` section 6, step 5). Until then, any data generated from a newer upstream is recorded as a
    divergence row in `docs/divergences.md`.
-3. Gates per package, all on this machine (GitHub Actions is disabled): `cargo fmt --check`,
-   `cargo clippy -p <crates> --all-targets -- -D warnings`, `cargo nextest run -p <crates>`,
-   `cargo build --release --workspace --bins`, repackage, then the Dori smoke (below). Two `maho-core` tests fail
-   on this machine for environment reasons (one needs `~/code/senpi` at the pin, one reads a real `~/.omo`
-   session file); they are not package failures.
-4. Golden and parity checks need a senpi checkout at the pin in `~/code/senpi` and `tools/golden/run.mjs`. Set
-   that up once before the first package that changes rendered output or RPC traces (P6 onward).
+3. Gates per package, all on omarchy (GitHub Actions is disabled), one cargo invocation at a time:
+   `cargo fmt --all --check`, `cargo clippy -p <crates> --all-targets -- -D warnings`,
+   `SENPI_SRC=$HOME/work/upstream/senpi-pin cargo nextest run -p <crates> --no-fail-fast`,
+   `cargo build --release --workspace --bins`, repackage, then the Dori smoke (below). Known failure on the base
+   branch: `maho-cli` `multi_session_entry::a_cli_built_host_answers_the_protocol_and_exits_on_its_empty_window`
+   (probe times out after 15 s); it is not a package failure. Keep `CARGO_TARGET_DIR` off `/tmp` (a quota-limited
+   tmpfs on omarchy).
+4. Tests and golden/parity checks that compare against upstream read the pinned senpi checkout through
+   `SENPI_SRC=$HOME/work/upstream/senpi-pin` (with `tools/golden/run.mjs` for goldens, P6 onward). Keep that
+   checkout at the PINS.md pin; move it only with the pin (P11).
 5. The real `~/.omo` is never written. Never run `claude login/logout`, never print credentials, never kill
    processes the worker did not start.
 
-Dori smoke (run through the wrapper with the packaged binary):
+Repackage on omarchy (Linux needs the sibling binaries, the staged omowright runtime from
+`scripts/install-dev.sh`, and the host glibc as the dev-build ceiling):
+
+```bash
+MHC_GLIBC_CEILING=2.44 bun tools/package-native.mjs --binary target/release/mhc \
+  --launcher-binary target/release/mhc-launcher --output dist/mhc --skill-source latest \
+  --git-bash-binary target/release/omo-git-bash --desktop-engine-binary target/release/senpi-desktop-engine \
+  --omowright-runtime <staged omowright runtime>
+bun tools/package-native.mjs --verify-only dist/mhc
+```
+
+Dori smoke (run through the wrapper with the packaged binary; omarchy's default model is not Claude, so name it):
 
 ```bash
 W=scripts/dori/mhc-dori.sh
-$W --no-session -p 'Reply with exactly: OK'                       # Claude subscription, default model
+$W --no-session --model anthropic-subscription/claude-opus-5-5 -p 'Reply with exactly: OK'   # Claude subscription
 $W --no-session --model chatgpt-subscription/gpt-6.1-sol -p 'Reply with exactly: OK'
 $W doctor                                                         # categories usable
 $W host ensure && $W host session open --cwd /tmp/x --name s --prompt 'Reply with exactly: PONG'
@@ -59,7 +75,7 @@ porting). Cost note from 2026-11-22: each of the four compatibility fixes took o
 | ID | Groups | Size | Depends on | Status | Done when |
 |---|---|---|---|---|---|
 | P0 | Stabilization: O09 catalog (claude-fable-5-2), intermittent child failures | S | - | in progress 2026-11-22 | doctor 10/10, DAG 5/5 |
-| P1 | O07 LSP ledger, O06 ultrawork, O08 MCP timeouts/SSE, O16 js-kernel-guard, rest of O09 | S each | P0 | not started | each group's TS diff ported, gates green |
+| P1 | O07 LSP ledger, O06 ultrawork, O08 MCP timeouts/SSE, O16 js-kernel-guard, rest of O09 | S each | P0 | done 2026-11-23 (merged into `dori/compat-20261122`) | each group's TS diff ported, gates green |
 | P2 | S07 ai (remove Anthropic OAuth paths, SIWC hardening, per-account catalog), rest of S08 (CLI `/login`, logout, account management, `recheckedAccounts`, `persistBlocks`) | M + M | P0 | S08 partly done (account store, tool bridge) | Claude and ChatGPT accounts can be added, removed and fail over inside mhc |
 | P3 | S09 tools core split + machine-ops crate | L | P2 | not started | bash/read/edit/write on the `*-core` split, machine-ops crate exists |
 | P4 | S05 + S16 kill-guard | L | P3 | not started | `kill`/`pkill`/`killall` against a protected process is refused, own processes still killable |
@@ -77,10 +93,11 @@ out unless Dori starts to need them.
 ## Brief template for a package worker
 
 ```text
-Port package <ID> (<groups>) into our mhc fork. Work only in the worktree /Volumes/Work/mac_work/mhc-wt/<ID>
+Port package <ID> (<groups>) into our mhc fork on omarchy. Work only in the worktree ~/work/mhc-wt/<ID>
 (branch sync/<ID>, cut from dori/compat-20261122 or its successor). Read AGENTS.md, CONTRIBUTING.md,
 docs/dori-sync/{backlog,roadmap,status-*}.md and the AGENTS.md of each crate you touch. Upstream: senpi at tag
-<senpi tag>, oh-my-openagent at tag <omo tag> under /Volumes/Work/mac_work/upstream. Scope: the TS files of
+<senpi tag>, oh-my-openagent at tag <omo tag> under ~/work/upstream; tests use
+SENPI_SRC=$HOME/work/upstream/senpi-pin. Scope: the TS files of
 <groups> listed in backlog.md; out of scope: <LOW parts>. Rules: roadmap.md "Rules that every package follows".
 Wait for every build, test and run in the foreground inside one tool call with a large timeout; never end your
 turn while anything you started is still running. Do not commit or push. Done when: <package "Done when">, plus
