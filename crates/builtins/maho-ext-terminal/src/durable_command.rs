@@ -26,8 +26,21 @@ pub struct RestartableCommandDeps {
     pub judge: Option<KillGuardJudge>,
 }
 
-fn default_judge_restored(_command: &str) -> KillGuardVerdict {
-    KillGuardVerdict::Allow
+fn default_judge_restored(command: &str) -> KillGuardVerdict {
+    let context = maho_core::kill_guard::host_kill_guard_context(
+        maho_core::kill_guard::KillGuardVantage::FreshSession,
+        maho_core::kill_guard::KillGuardShell::Bash,
+    );
+    match maho_core::kill_guard::judge_command(command, &context) {
+        maho_core::kill_guard::KillGuardVerdict::Allow
+        | maho_core::kill_guard::KillGuardVerdict::Defer { .. } => KillGuardVerdict::Allow,
+        maho_core::kill_guard::KillGuardVerdict::Refuse { rule, message } => {
+            KillGuardVerdict::Refuse {
+                code: format!("{rule:?}"),
+                message,
+            }
+        }
+    }
 }
 
 pub fn restore_command(
@@ -165,7 +178,13 @@ pub fn restore_configured_command_in_with_deps(
     else {
         return (RestoreOutcome::Lost, None);
     };
-    let guard_on = deps.kill_guard_on.as_ref().is_none_or(|f| f());
+    let guard_on = match &deps.kill_guard_on {
+        Some(f) => f(),
+        None => monitor.cwd.as_deref().is_none_or(|cwd| {
+            maho_core::kill_guard::read_kill_guard_setting(Path::new(cwd), None)
+                == maho_core::kill_guard::KillGuardSetting::On
+        }),
+    };
     if guard_on {
         let verdict = match &deps.judge {
             Some(judge) => judge(command),
@@ -489,5 +508,32 @@ mod tests {
         );
         tokio::time::timeout(std::time::Duration::from_secs(5),async {assert!(matches!(events.recv().await,Some(crate::monitor_registry::MonitorEvent::Line {line,..}) if line=="restored"));assert!(matches!(events.recv().await,Some(crate::monitor_registry::MonitorEvent::Summary {..})));}).await.unwrap();
         manager.teardown().unwrap();
+    }
+
+    #[test]
+    fn default_kill_guard_refuses_protected_command_on_restore() {
+        let mut saved = monitor();
+        saved.command = Some("kill -9 1".to_owned());
+        let mut manager = TerminalManager::default();
+        let deps = RestartableCommandDeps {
+            kill_guard_on: Some(Arc::new(|| true)),
+            judge: None,
+        };
+        let (outcome, reason) = restore_configured_command_in_with_deps(
+            &saved,
+            &mut manager,
+            None,
+            &crate::settings::TERMINAL_SETTINGS_DEFAULTS,
+            &RestoreEnvironment::default(),
+            &deps,
+            |_, _, _| panic!("refused command must not register"),
+        );
+        assert_eq!(outcome, RestoreOutcome::Lost);
+        let msg = reason.expect("refusal reason");
+        assert!(
+            msg.contains("[senpi:kill-guard]"),
+            "unexpected reason: {msg}"
+        );
+        assert_eq!(manager.size(), 0);
     }
 }

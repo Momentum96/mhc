@@ -436,14 +436,18 @@ impl TerminalManifestWriter {
                     if remaining_ms.is_some()
                         && monitor.runtime_kind == MonitorRuntimeKind::Command =>
                 {
-                    crate::durable_command::restore_configured_command_in(
-                        &monitor,
-                        manager,
-                        shell,
-                        settings,
-                        &restore_environment,
-                        |_, runtime, record| registry.register(runtime, record),
-                    )
+                    let (outcome, lost_reason) =
+                        crate::durable_command::restore_configured_command_in_with_deps(
+                            &monitor,
+                            manager,
+                            shell,
+                            settings,
+                            &restore_environment,
+                            &crate::durable_command::RestartableCommandDeps::default(),
+                            |_, runtime, record| registry.register(runtime, record),
+                        );
+                    reason = lost_reason;
+                    outcome
                 }
                 MonitorDurabilityClass::Ephemeral if remaining_ms.is_some() => {
                     crate::durable_file::restore_file_in(
@@ -457,14 +461,18 @@ impl TerminalManifestWriter {
                 }
                 MonitorDurabilityClass::Ephemeral => RestoreOutcome::Lost,
                 MonitorDurabilityClass::RestartableCommand => {
-                    crate::durable_command::restore_configured_command_in(
-                        &monitor,
-                        manager,
-                        shell,
-                        settings,
-                        &restore_environment,
-                        |_, runtime, record| registry.register(runtime, record),
-                    )
+                    let (outcome, lost_reason) =
+                        crate::durable_command::restore_configured_command_in_with_deps(
+                            &monitor,
+                            manager,
+                            shell,
+                            settings,
+                            &restore_environment,
+                            &crate::durable_command::RestartableCommandDeps::default(),
+                            |_, runtime, record| registry.register(runtime, record),
+                        );
+                    reason = lost_reason;
+                    outcome
                 }
                 MonitorDurabilityClass::CheckpointedFile => {
                     crate::durable_file::restore_file(&monitor, registry, manager, None, now)
