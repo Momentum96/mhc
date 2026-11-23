@@ -1,7 +1,8 @@
 # Dori sync roadmap: how to resume the large ports
 
 This turns `backlog.md` (measured upstream changes) into work packages that a later session can pick up one at a
-time. `status-2026-11-22.md` records what already landed. Read both first; this file only adds order,
+time. `status-2026-11-22.md` and `status-2026-11-23.md` (P1, P2, open items, omarchy setup) record what already
+landed. Read them first; this file only adds order,
 boundaries, gates and the brief to hand to a worker.
 
 Decision on record (2026-11-22): the owner chose stabilization first. The large ports below are parked, not
@@ -19,6 +20,8 @@ cost before starting the next.
 | Target versions | omo `v5.1.81` with senpi `v2026.11.19-5`; `scripts/dori/sync-detect.sh` prints the current range |
 | Isolated runs | `scripts/dori/mhc-dori.sh` (shadow HOME `~/.maho/home`, `MHC_BIN` selects the binary) |
 | Packaged build | `dist/mhc` (local only, excluded via `.git/info/exclude`) |
+| Build output | `/mnt/nvme-work/targets/<checkout or worktree name>` on the NVMe; each `target` is a symlink to it (`~/work` itself is on a slow HDD) |
+| Latest status and open items | `docs/dori-sync/status-2026-11-23.md` |
 
 ## Rules that every package follows
 
@@ -41,6 +44,10 @@ cost before starting the next.
    checkout at the PINS.md pin; move it only with the pin (P11).
 5. The real `~/.omo` is never written. Never run `claude login/logout`, never print credentials, never kill
    processes the worker did not start.
+6. Build output lives on the NVMe. Before the first build in a checkout or worktree, make its `target` a symlink:
+   `mkdir -p /mnt/nvme-work/targets/<name> && ln -s /mnt/nvme-work/targets/<name> target` (`<name>` is the
+   checkout or worktree folder name). Do not move `~/work` itself. Several agents build on omarchy at once, so
+   every cargo command runs as `flock $HOME/work/.mhc-cargo.lock cargo ...`.
 
 Repackage on omarchy (Linux needs the sibling binaries, the staged omowright runtime from
 `scripts/install-dev.sh`, and the host glibc as the dev-build ceiling):
@@ -50,7 +57,7 @@ MHC_GLIBC_CEILING=2.44 bun tools/package-native.mjs --binary target/release/mhc 
   --launcher-binary target/release/mhc-launcher --output dist/mhc --skill-source latest \
   --git-bash-binary target/release/omo-git-bash --desktop-engine-binary target/release/senpi-desktop-engine \
   --omowright-runtime <staged omowright runtime>
-bun tools/package-native.mjs --verify-only dist/mhc
+MHC_GLIBC_CEILING=2.44 bun tools/package-native.mjs --verify-only dist/mhc
 ```
 
 Dori smoke (run through the wrapper with the packaged binary; omarchy's default model is not Claude, so name it):
@@ -74,9 +81,9 @@ porting). Cost note from 2026-11-22: each of the four compatibility fixes took o
 
 | ID | Groups | Size | Depends on | Status | Done when |
 |---|---|---|---|---|---|
-| P0 | Stabilization: O09 catalog (claude-fable-5-2), intermittent child failures | S | - | in progress 2026-11-22 | doctor 10/10, DAG 5/5 |
+| P0 | Stabilization: O09 catalog (claude-fable-5-2), intermittent child failures | S | - | done 2026-11-22 | doctor 10/10, DAG 5/5 |
 | P1 | O07 LSP ledger, O06 ultrawork, O08 MCP timeouts/SSE, O16 js-kernel-guard, rest of O09 | S each | P0 | done 2026-11-23 (merged into `dori/compat-20261122`) | each group's TS diff ported, gates green |
-| P2 | S07 ai (remove Anthropic OAuth paths, SIWC hardening, per-account catalog), rest of S08 (CLI `/login`, logout, account management, `recheckedAccounts`, `persistBlocks`) | M + M | P0 | S08 partly done (account store, tool bridge) | Claude and ChatGPT accounts can be added, removed and fail over inside mhc |
+| P2 | S07 ai (remove Anthropic OAuth paths, SIWC hardening, per-account catalog), rest of S08 (CLI `/login`, logout, account management, `recheckedAccounts`, `persistBlocks`) | M + M | P0 | done 2026-11-23 (live ChatGPT smoke and DAG pending, see status-2026-11-23.md) | Claude and ChatGPT accounts can be added, removed and fail over inside mhc |
 | P3 | S09 tools core split + machine-ops crate | L | P2 | not started | bash/read/edit/write on the `*-core` split, machine-ops crate exists |
 | P4 | S05 + S16 kill-guard | L | P3 | not started | `kill`/`pkill`/`killall` against a protected process is refused, own processes still killable |
 | P5 | S12 terminal (background reporting, auto-reap, interrupt stops jobs) | M | P3 | not started | monitor and bash session behavior matches omo 5.1.81 |
@@ -94,16 +101,26 @@ out unless Dori starts to need them.
 
 ```text
 Port package <ID> (<groups>) into our mhc fork on omarchy. Work only in the worktree ~/work/mhc-wt/<ID>
-(branch sync/<ID>, cut from dori/compat-20261122 or its successor). Read AGENTS.md, CONTRIBUTING.md,
-docs/dori-sync/{backlog,roadmap,status-*}.md and the AGENTS.md of each crate you touch. Upstream: senpi at tag
+(branch sync/<ID>, cut from dori/compat-20261122 or its successor; its target is a symlink to
+/mnt/nvme-work/targets/<ID>). Read AGENTS.md, CONTRIBUTING.md, docs/dori-sync/{backlog,roadmap}.md,
+docs/dori-sync/status-2026-11-23.md (latest state and open items) and the AGENTS.md of each crate you touch. Upstream: senpi at tag
 <senpi tag>, oh-my-openagent at tag <omo tag> under ~/work/upstream; tests use
-SENPI_SRC=$HOME/work/upstream/senpi-pin. Scope: the TS files of
+SENPI_SRC=$HOME/work/upstream/senpi-pin; every cargo command runs under flock $HOME/work/.mhc-cargo.lock. Scope: the TS files of
 <groups> listed in backlog.md; out of scope: <LOW parts>. Rules: roadmap.md "Rules that every package follows".
 Wait for every build, test and run in the foreground inside one tool call with a large timeout; never end your
 turn while anything you started is still running. Do not commit or push. Done when: <package "Done when">, plus
 the gates and the Dori smoke. Report: files changed per TS source file, tests added, gate results, smoke output,
 and the tokens and wall time the package took.
 ```
+
+## Starting a package with agy
+
+agy (the Antigravity CLI) has none of the earlier conversations, so everything it needs is in this folder:
+
+1. Create the worktree: `git -C ~/work/mhc fetch origin && git -C ~/work/mhc worktree add ~/work/mhc-wt/<ID> -b sync/<ID> origin/dori/compat-20261122`.
+2. Give it an NVMe target: `cd ~/work/mhc-wt/<ID> && mkdir -p /mnt/nvme-work/targets/<ID> && ln -s /mnt/nvme-work/targets/<ID> target`.
+3. Open agy in `~/work/mhc-wt/<ID>` and tell it: "Run package <ID> following docs/dori-sync/roadmap.md."
+4. When it reports back, check the gates it ran and the status line in the work-package table.
 
 ## Lessons from 2026-11-22
 
