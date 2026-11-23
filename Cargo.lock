@@ -3626,6 +3626,7 @@ dependencies = [
  "maho-ext-host",
  "maho-ext-html-render",
  "maho-ext-imagegen",
+ "maho-ext-kill-guard",
  "maho-ext-look-at",
  "maho-ext-loop",
  "maho-ext-loop-guard",
@@ -3738,6 +3739,7 @@ dependencies = [
  "hyper-util",
  "maho-agent",
  "maho-ai",
+ "maho-core",
  "maho-ext-api",
  "maho-ext-host",
  "maho-interactive",
@@ -4315,6 +4317,18 @@ dependencies = [
  "libc",
  "maho-ai",
  "maho-ext-api",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
+name = "maho-ext-kill-guard"
+version = "0.0.0"
+dependencies = [
+ "maho-core",
+ "maho-ext-api",
+ "maho-test-support",
  "serde_json",
  "tempfile",
  "tokio",
