@@ -591,7 +591,6 @@ impl ModelsAuth for RuntimeAuth {
 fn builtin_oauth(id: &str) -> Option<Arc<dyn maho_ai::auth::types::OAuthAuth>> {
     use maho_ai::auth::oauth;
     match id {
-        "anthropic" | "anthropic-subscription" => Some(oauth::anthropic::anthropic_oauth()),
         "chatgpt-subscription" => Some(oauth::chatgpt_subscription::chatgpt_subscription_oauth()),
         "github-copilot" => Some(oauth::github_copilot::github_copilot_oauth()),
         "openrouter" => Some(oauth::openrouter::open_router_oauth()),

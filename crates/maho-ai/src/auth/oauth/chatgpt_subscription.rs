@@ -1,6 +1,6 @@
 //! Port of senpi packages/ai/src/auth/oauth/chatgpt-subscription.ts.
 
-use crate::auth::oauth::authorization_input::parse_authorization_input;
+use crate::auth::oauth::chatgpt_authorization_input::parse_authorization_input;
 use crate::auth::oauth::device_code::{
     OAuthDeviceCodePollOptions, OAuthDeviceCodePollResult, poll_oauth_device_code_flow,
 };
