@@ -3414,8 +3414,10 @@ dependencies = [
 name = "maho-agent"
 version = "0.0.0"
 dependencies = [
+ "base64 0.22.1",
  "futures",
  "ignore",
+ "libc",
  "maho-ai",
  "maho-chord",
  "maho-test-support",
@@ -3434,6 +3436,7 @@ dependencies = [
  "tree-sitter-javascript",
  "tree-sitter-typescript",
  "unicode-normalization",
+ "uuid",
  "winsafe",
 ]
 
