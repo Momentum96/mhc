@@ -85,10 +85,10 @@ porting). Cost note from 2026-11-22: each of the four compatibility fixes took o
 | P1 | O07 LSP ledger, O06 ultrawork, O08 MCP timeouts/SSE, O16 js-kernel-guard, rest of O09 | S each | P0 | done 2026-11-23 (merged into `dori/compat-20261122`) | each group's TS diff ported, gates green |
 | P2 | S07 ai (remove Anthropic OAuth paths, SIWC hardening, per-account catalog), rest of S08 (CLI `/login`, logout, account management, `recheckedAccounts`, `persistBlocks`) | M + M | P0 | done 2026-11-23 (merged into `dori/compat-20261122`) | Claude and ChatGPT accounts can be added, removed and fail over inside mhc |
 | P3 | S09 tools core split + machine-ops crate | L | P2 | done 2026-11-24 (merged into `dori/compat-20261122`) | bash/read/edit/write on the `*-core` split, machine-ops crate exists |
-| P4 | S05 + S16 kill-guard | L | P3 | not started | `kill`/`pkill`/`killall` against a protected process is refused, own processes still killable |
-| P5 | S12 terminal (background reporting, auto-reap, interrupt stops jobs) | M | P3 | not started | monitor and bash session behavior matches omo 5.1.81 |
+| P4 | S05 + S16 kill-guard | L | P3 | done 2026-11-24 (merged into `dori/compat-20261122`) | `kill`/`pkill`/`killall` against a protected process is refused, own processes still killable |
+| P5 | S12 terminal (background reporting, auto-reap, interrupt stops jobs) | M | P3 | done 2026-11-24 (merged into `dori/compat-20261122`) | monitor and bash session behavior matches omo 5.1.81 |
 | P6 | S10 codemode, S11 extension host/api (rest), S13 mcp, S14 webfetch/websearch | M each | P2 | done 2026-11-24 (merged into `dori/compat-20261122`) | eval kernels with permission checks, MCP OAuth continuity |
-| P7 | S06 agent durable store + execution ledger | XL | P3 | not started | DurableStore contract and conformance suites pass |
+| P7 | S06 agent durable store + execution ledger | XL | P3 | done 2026-11-24 (merged into `dori/compat-20261122`) | DurableStore contract and conformance suites pass |
 | P8 | S03 core session (store-first SessionManager, move, import, lifecycle order), S20 cli session opening | L + M | P7 | not started | sessions survive a restart the way omo's do |
 | P9 | S01 + S02 rpc host daemon and compact recovery | XL | P8 | two host fixes landed (disconnect keeps the turn, `MAHO_` env) | host verbs Dori uses behave like omo 5.1.81; freeze current traces first |
 | P10 | O05 task (designated chains, child dialogs, routing resolve), O04 memory (no sync), O01 thread (local tools, wake, host-ensure) | M + L + XL | P8 (O05), P9 (O01) | not started | DAG, memory tool and thread tools match omo |
