@@ -3950,6 +3950,8 @@ dependencies = [
 name = "maho-ext-api"
 version = "0.0.0"
 dependencies = [
+ "anyhow",
+ "async-trait",
  "maho-agent",
  "maho-ai",
  "maho-tools",
@@ -4007,6 +4009,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "base64 0.22.1",
+ "chrono",
  "maho-agent",
  "maho-ai",
  "maho-core",
@@ -4895,8 +4898,10 @@ version = "0.0.0"
 dependencies = [
  "dom_query 0.27.0",
  "futures",
+ "getrandom 0.4.2",
  "html5ever 0.38.0",
  "hyper",
+ "maho-core",
  "maho-ext-api",
  "maho-ext-host",
  "maho-interactive",
@@ -4904,6 +4909,8 @@ dependencies = [
  "maho-tui",
  "regex",
  "reqwest 0.13.2",
+ "rustix 1.1.6",
+ "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.20",
