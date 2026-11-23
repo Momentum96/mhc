@@ -5159,6 +5159,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "maho-machine-ops"
+version = "0.0.0"
+dependencies = [
+ "base64 0.22.1",
+ "getrandom 0.3.4",
+ "maho-pty",
+ "nix 0.28.0",
+ "regex",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
+ "unicode-normalization",
+ "vt100",
+]
+
+[[package]]
 name = "maho-mcp-builtins"
 version = "0.0.0"
 dependencies = [
@@ -6447,10 +6465,12 @@ version = "0.0.0"
 dependencies = [
  "base64 0.22.1",
  "dunce",
+ "getrandom 0.3.4",
  "image 0.25.10",
  "maho-agent",
  "maho-ai",
  "maho-grep",
+ "maho-machine-ops",
  "maho-process-env",
  "nix 0.28.0",
  "percent-encoding",
