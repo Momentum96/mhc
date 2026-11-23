@@ -14720,6 +14720,7 @@ impl AgentSession {
                 let context = maho_agent::types::AgentContext {
                     declared_tools: None,
                     system_prompt: system_prompt.clone(),
+                    system_prompt_stable_prefix: None,
                     messages,
                     tools: Some(tools.clone()),
                 };
@@ -18355,6 +18356,7 @@ impl AgentSession {
                             context: Some(maho_agent::types::AgentContext {
                                 declared_tools: None,
                                 system_prompt: state.system_prompt.clone(),
+                                system_prompt_stable_prefix: None,
                                 messages,
                                 tools: Some(state.tools().to_vec()),
                             }),
@@ -18454,6 +18456,7 @@ impl AgentSession {
                         context: Some(maho_agent::types::AgentContext {
                             declared_tools: None,
                             system_prompt: state.system_prompt.clone(),
+                            system_prompt_stable_prefix: None,
                             messages: previous_context.messages,
                             tools: Some(state.tools().to_vec()),
                         }),
