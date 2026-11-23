@@ -84,10 +84,10 @@ porting). Cost note from 2026-11-22: each of the four compatibility fixes took o
 | P0 | Stabilization: O09 catalog (claude-fable-5-2), intermittent child failures | S | - | done 2026-11-22 | doctor 10/10, DAG 5/5 |
 | P1 | O07 LSP ledger, O06 ultrawork, O08 MCP timeouts/SSE, O16 js-kernel-guard, rest of O09 | S each | P0 | done 2026-11-23 (merged into `dori/compat-20261122`) | each group's TS diff ported, gates green |
 | P2 | S07 ai (remove Anthropic OAuth paths, SIWC hardening, per-account catalog), rest of S08 (CLI `/login`, logout, account management, `recheckedAccounts`, `persistBlocks`) | M + M | P0 | done 2026-11-23 (merged into `dori/compat-20261122`) | Claude and ChatGPT accounts can be added, removed and fail over inside mhc |
-| P3 | S09 tools core split + machine-ops crate | L | P2 | not started | bash/read/edit/write on the `*-core` split, machine-ops crate exists |
+| P3 | S09 tools core split + machine-ops crate | L | P2 | done 2026-11-24 (merged into `dori/compat-20261122`) | bash/read/edit/write on the `*-core` split, machine-ops crate exists |
 | P4 | S05 + S16 kill-guard | L | P3 | not started | `kill`/`pkill`/`killall` against a protected process is refused, own processes still killable |
 | P5 | S12 terminal (background reporting, auto-reap, interrupt stops jobs) | M | P3 | not started | monitor and bash session behavior matches omo 5.1.81 |
-| P6 | S10 codemode, S11 extension host/api (rest), S13 mcp, S14 webfetch/websearch | M each | P2 | S11 `provider_context` ported | eval kernels with permission checks, MCP OAuth continuity |
+| P6 | S10 codemode, S11 extension host/api (rest), S13 mcp, S14 webfetch/websearch | M each | P2 | done 2026-11-24 (merged into `dori/compat-20261122`) | eval kernels with permission checks, MCP OAuth continuity |
 | P7 | S06 agent durable store + execution ledger | XL | P3 | not started | DurableStore contract and conformance suites pass |
 | P8 | S03 core session (store-first SessionManager, move, import, lifecycle order), S20 cli session opening | L + M | P7 | not started | sessions survive a restart the way omo's do |
 | P9 | S01 + S02 rpc host daemon and compact recovery | XL | P8 | two host fixes landed (disconnect keeps the turn, `MAHO_` env) | host verbs Dori uses behave like omo 5.1.81; freeze current traces first |
@@ -131,3 +131,5 @@ agy (the Antigravity CLI) has none of the earlier conversations, so everything i
   Never repackage `dist/` while a benchmark or smoke run uses it.
 - The shadow HOME must not mirror `.pi`/`.senpi`: mhc's startup migrations import from them.
 - Memory comparisons must split Claude CLI processes from the engine; the CLI is the same binary on both sides.
+- On omarchy, prepend `~/.local/share/mise/installs/claude/latest` first on `PATH` for every smoke run so `claude` resolves directly to the ELF binary instead of `~/.local/bin/claude` (`mise use -g --quiet claude`, which can block under `host`).
+- Hold `.mhc-smoke.lock` on FD 9 (`exec 9>$HOME/work/.mhc-smoke.lock && flock 9`) and append `9>&-` to every `mhc-dori.sh` call (with an `EXIT` trap running `host stop`) so daemonized `host ensure` supervisors never inherit the smoke-lock descriptor.
