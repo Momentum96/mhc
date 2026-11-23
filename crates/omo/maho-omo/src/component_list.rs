@@ -253,9 +253,8 @@ pub fn omo_components(
             telemetry.register(api);
         },
     ));
-    components.push(component(
-        "ultrawork",
-        maho_ultrawork::UltraworkExtension::default(),
+    components.push(crate::keyword_detector_settings::component(
+        options.env.clone(),
     ));
     components.push(component(
         "skill-pointers",

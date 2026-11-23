@@ -28,6 +28,31 @@ whether every category resolves to an available model.
 If you keep a separate agent directory (for example `MAHO_CODING_AGENT_DIR=~/.maho/agent`),
 `mhc import-omo` copies settings, models, keybindings, auth and sessions over from `~/.omo/agent`.
 
+## Ultrawork keyword activation
+
+In either native build profile, add this to your user or project `omo.jsonc` to stop `ulw`,
+`ultrawork`, and their mass aliases from activating ultrawork automatically:
+
+```jsonc
+{
+  "keyword_detector": {
+    "disabled_keywords": ["ultrawork"]
+  }
+}
+```
+
+- `disabled_keywords` is a denylist. It wins even if the same mode is in `enabled_expansions`.
+- `enabled_expansions` is an optional allowlist. Omit it to keep the default, or use `[]` to allow
+  no expansions. If set, it must include `ultrawork` for the keyword to activate the mode.
+- The shared lists also accept `team`, `hyperplan`, and `hyperplan-ultrawork`; those entries do
+  not activate separate modes in mhc.
+
+The settings may also appear under `"[native]"` and in a named profile. Later config layers
+replace each list they specify, not the entire `keyword_detector` object. The launch flag
+`--ultrawork-disabled` can still disable activation regardless of the lists; the OmO build
+also has `--omo-senpi-ultrawork-disabled`. These settings do not block ordinary prompt
+delivery or explicit skill invocation.
+
 ## Session retention
 
 Sessions are kept forever by default. Set `sessionRetentionDays` in `settings.json` to a whole number
