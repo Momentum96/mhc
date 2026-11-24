@@ -431,6 +431,15 @@ async fn handle_input_line_with_login_state(
         })
         .map(Some);
     }
+    if let Some(response) = crate::connection_handler_p9::handle_extended_session_command(
+        session,
+        &value,
+        sink.as_ref(),
+    )
+    .await
+    {
+        return crate::jsonl::serialize_json_line(&response).map(Some);
+    }
     // PERF-DIVERGENCE(senpi): upstream passes the parsed JSON object straight on; we deserialize from `&Value` instead of deep-cloning the whole command (MBs with inline images). Same command and same serde error text.
     let command: RpcCommand = match <RpcCommand as serde::Deserialize>::deserialize(&value) {
         Ok(command) => command,
@@ -720,7 +729,7 @@ pub fn build_rpc_session_state_with_dialogs(
 }
 /// The classic `get_protocol_info` capabilities that precede the tool-runtime and negotiated ones (senpi
 /// connection-handler.ts), `entries_tail` last.
-const CLASSIC_CAPABILITIES: [&str; 17] = [
+const CLASSIC_CAPABILITIES: [&str; 22] = [
     "multi_session",
     crate::custom_capability::SNAPSHOT_CURSOR_CAPABILITY,
     crate::custom_capability::UI_ANSWER_LEDGER_CAPABILITY,
@@ -738,6 +747,11 @@ const CLASSIC_CAPABILITIES: [&str; 17] = [
     crate::rpc_types::USER_ACTIVITY_CAPABILITY,
     crate::custom_capability::RESUME_SESSION_CAPABILITY,
     crate::custom_capability::ENTRIES_TAIL_CAPABILITY,
+    crate::secret_input_presentations::SECRET_INPUT_CAPABILITY,
+    crate::host_capabilities::SET_PERMISSION_PRESET_CAPABILITY,
+    crate::custom_capability::SESSION_MODEL_SCOPE_CAPABILITY,
+    crate::custom_capability::PROVIDER_ACCOUNT_TEST_CAPABILITY,
+    crate::custom_capability::ACCOUNT_RESET_CAPABILITY,
 ];
 /// The leading capabilities of the classic `get_protocol_info` list that precede the negotiated ones.
 const CLASSIC_BASE_CAPABILITIES: usize = CLASSIC_CAPABILITIES.len();
@@ -1032,10 +1046,49 @@ async fn run_prompt_command(
         session_title_prompt,
         expand_prompt_templates,
         unknown_command_as_text,
+        chain_count,
+        expected_leaf_id,
     } = &command.body
     else {
         unreachable!("only prompt commands are routed here")
     };
+    if let crate::chain_admission::ChainAdmission::Refused(refusal) =
+        session.with_settings_manager(|s| {
+            crate::chain_admission::admit_input_chain(chain_count.as_ref(), s)
+        })
+    {
+        return Some(RpcResponse {
+            id: command.id.clone(),
+            record_type: ResponseRecordType::Response,
+            command: "prompt".into(),
+            session_id: command.session_id.clone(),
+            result: RpcResponseResult::Error {
+                error: refusal.message,
+                error_code: Some(refusal.error_code.to_owned()),
+                error_data: Some(refusal.error_data),
+            },
+        });
+    }
+    if let Some(refusal) = crate::prompt_expected_leaf::refuse_prompt_at_moved_leaf(
+        session,
+        crate::prompt_expected_leaf::PromptLeafGuard {
+            expected_leaf_id: expected_leaf_id.as_deref(),
+            has_streaming_behavior: streaming_behavior.is_some(),
+        },
+        crate::automatic_input_gate::automatic_input_would_be_held(session, false),
+    ) {
+        return Some(RpcResponse {
+            id: command.id.clone(),
+            record_type: ResponseRecordType::Response,
+            command: "prompt".into(),
+            session_id: command.session_id.clone(),
+            result: RpcResponseResult::Error {
+                error: refusal.message,
+                error_code: Some(refusal.error_code.to_owned()),
+                error_data: default_error_data(session, "prompt"),
+            },
+        });
+    }
     {
         let options = (|| {
             if thinking_level.is_some() && session.is_streaming() && streaming_behavior.is_some() {
@@ -1278,8 +1331,9 @@ async fn handle_session_command_with_sink(
         RpcCommandBody::ExportHtml{output_path,theme_name}=> {
             ("export_html", session.export_to_html(output_path.as_deref(), theme_name.as_deref()).map(|path|Some(serde_json::json!({"path":path}))))
         },
-        RpcCommandBody::Steer{message,images,enqueue_order}|RpcCommandBody::FollowUp{message,images,enqueue_order}=>{
+        RpcCommandBody::Steer{message,images,enqueue_order,chain_count}|RpcCommandBody::FollowUp{message,images,enqueue_order,chain_count}=>{
             let kind=if matches!(&command.body,RpcCommandBody::Steer{..}){"steer"}else{"follow_up"};
+            if let crate::chain_admission::ChainAdmission::Refused(refusal)=session.with_settings_manager(|s|crate::chain_admission::admit_input_chain(chain_count.as_ref(),s)){return Some(RpcResponse{id:command.id.clone(),record_type:ResponseRecordType::Response,command:kind.into(),session_id:command.session_id.clone(),result:RpcResponseResult::Error{error:refusal.message,error_code:Some(refusal.error_code.to_owned()),error_data:Some(refusal.error_data)}});}
             let images=images.as_ref().map(|images|images.iter().cloned().map(serde_json::from_value).collect::<Result<Vec<maho_ai::types::ImageContent>,_>>()).transpose();
             let result=match images{Err(error)=>Err(error.to_string()),Ok(images)=>{
                 let options=QueuedInputOptions{enqueue_order:enqueue_order.map(|order|order as u64),source:Some(maho_ext_api::InputSource::Rpc),from_prompt:false,..Default::default()};
@@ -1338,8 +1392,8 @@ async fn handle_session_command_with_sink(
             if let Some(refusal)=session.continue_from_leaf_refusal(){return Some(coded_error(command,"continue_from_leaf",refusal.to_string(),refusal.code.as_str()));}
             ("continue_from_leaf",session.continue_from_leaf().await.map(|()|None))
         },
-        RpcCommandBody::Interrupt{turn_id,..}=>{
-            let outcome=crate::session_control_actions_data::interrupt_running_turn(session,turn_id.as_ref(),||session.abort()).await;
+        RpcCommandBody::Interrupt{turn_id,background,..}=>{
+            let outcome=crate::session_control_actions_data::interrupt_running_turn_with_background(session,turn_id.as_ref(),||session.abort(),background.as_ref()).await;
             ("interrupt",serde_json::to_value(outcome).map(Some).map_err(|error|error.to_string()))
         },
         // senpi: without `options.retryFallbackCommand` (this binding has no such launch option, and it does not
@@ -3681,25 +3735,7 @@ mod new_session_tests {
         assert_eq!(info["data"]["protocolVersion"], 1);
         assert_eq!(
             info["data"]["capabilities"].as_array().unwrap()[..CLASSIC_BASE_CAPABILITIES],
-            [
-                "multi_session",
-                "snapshot_cursor",
-                "ui_answer_ledger",
-                "session_lifecycle",
-                "auto_title_sessions",
-                "media_placeholders",
-                "durable_client_message_id",
-                "effect_ledger",
-                "steer_when_idle",
-                "continue_from_leaf",
-                "eval_cells",
-                "auth_key_verify",
-                "queued_message_revision",
-                "tool_barrier",
-                "user_activity",
-                "resume_session",
-                "entries_tail"
-            ]
+            CLASSIC_CAPABILITIES
         );
         let open = serde_json::to_value(
             handle_session_command(
