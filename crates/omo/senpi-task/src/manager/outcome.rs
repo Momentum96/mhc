@@ -368,18 +368,43 @@ fn settle_error_outcome(
     ports.release_slot(&input.task_id, &input.model, input.epoch);
     settle_isolation_for(ports, &input.task_id, false);
     let owned = ports.try_load(&input.task_id);
+    let fields = owned.as_ref().map(|record| {
+        crate::manager::model_refusals::terminal_failure_fields(
+            record,
+            &input.failure,
+            crate::manager::model_refusals::is_model_turn_failure(input.killed, &input.failure),
+        )
+    });
+    let error_message = fields.as_ref().map_or_else(
+        || {
+            crate::manager::credential_failure::terminal_failure_message(
+                None,
+                &input.failure.message,
+            )
+        },
+        |fields| fields.error_message.clone(),
+    );
     let transition = TaskTransition::Fail {
         timestamp: ports.now_iso(),
-        error_message: crate::manager::credential_failure::terminal_failure_message(
-            owned.as_ref(),
-            &input.failure.message,
-        ),
+        error_message,
         killed: input.killed,
         run_stats: input.run_stats.clone(),
     };
     if let Err(error) = ports.store().transition(&input.task_id, &transition) {
         log_failure(
             "senpi-task manager error outcome tracking failed",
+            &input.task_id,
+            &error,
+        );
+    } else if let Some(failure_kind) = fields.and_then(|fields| fields.failure_kind)
+        && let Err(error) = ports.store().mutate(&input.task_id, |fresh| {
+            let mut updated = fresh.clone();
+            updated.failure_kind = Some(failure_kind.clone());
+            updated
+        })
+    {
+        log_failure(
+            "senpi-task manager error outcome failure_kind update failed",
             &input.task_id,
             &error,
         );
