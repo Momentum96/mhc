@@ -2251,6 +2251,12 @@ pub struct RpcConnectionHandler {
     /// senpi `options.toolRuntime`: a single-session `--mode rpc` process advertises its `--tool-runtime` as
     /// `tool_runtime:<value>`.
     tool_runtime: Option<crate::host_capabilities::ToolRuntimeKind>,
+    /// senpi `options.retryFallbackCommand`: single-session `--mode rpc` advertises `retry_fallback_command`
+    /// and accepts `set_retry_fallback` before the session's first turn.
+    retry_fallback_command: bool,
+    /// senpi `turnRequested`: records the `session_id` of the session on which a
+    /// prompt/steer/follow_up/continue_from_leaf has arrived, so a replacement session still gets a pre-turn window.
+    turn_requested_session: std::sync::Mutex<Option<String>>,
     /// senpi `sessionControl`: the session's `registerControlEndpoint` host and the `wake` command's target.
     session_control: std::sync::Arc<crate::host_session_control::HostSessionControl>,
 }
@@ -2516,6 +2522,8 @@ impl RpcConnectionHandler {
             relocation: Default::default(),
             connection_roles: Default::default(),
             tool_runtime: None,
+            retry_fallback_command: false,
+            turn_requested_session: std::sync::Mutex::new(None),
             session_control,
         }
     }
@@ -2525,6 +2533,12 @@ impl RpcConnectionHandler {
         tool_runtime: Option<crate::host_capabilities::ToolRuntimeKind>,
     ) -> Self {
         self.tool_runtime = tool_runtime;
+        self
+    }
+    /// senpi `options.retryFallbackCommand`: advertise `retry_fallback_command` and accept `set_retry_fallback`
+    /// before the session's first turn (single-session `--mode rpc`).
+    pub fn with_retry_fallback_command(mut self, enabled: bool) -> Self {
+        self.retry_fallback_command = enabled;
         self
     }
     pub fn with_connection_roles(
@@ -2830,6 +2844,85 @@ impl RpcConnectionHandler {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .has(connection, crate::custom_capability::TASK_PARENT_CAPABILITY);
+            let current_session_id = self.session.session_id();
+            if matches!(
+                command_kind,
+                "prompt" | "steer" | "follow_up" | "continue_from_leaf"
+            ) {
+                *self
+                    .turn_requested_session
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                    Some(current_session_id.clone());
+            }
+            if command_kind == "set_retry_fallback" {
+                let response = if !self.retry_fallback_command {
+                    RpcResponse {
+                        id: value["id"].as_str().map(str::to_owned),
+                        record_type: ResponseRecordType::Response,
+                        command: "set_retry_fallback".into(),
+                        session_id: value["sessionId"].as_str().map(str::to_owned),
+                        result: RpcResponseResult::Error {
+                            error: "set_retry_fallback is for a single-session rpc process; a host session takes open_session.retryFallback.".into(),
+                            error_code: None,
+                            error_data: None,
+                        },
+                    }
+                } else {
+                    let profile = value.get("retryFallback");
+                    let outcome = if let Some(err) =
+                        crate::rpc_input_validation::retry_fallback_error(profile)
+                    {
+                        Err(err)
+                    } else if let Some(profile) = profile {
+                        let requested_for_current = self
+                            .turn_requested_session
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .as_deref()
+                            == Some(current_session_id.as_str());
+                        let has_turn_history = self.session.messages().into_iter().any(|m| {
+                            !matches!(
+                                m,
+                                maho_agent::types::AgentMessage::Custom(
+                                    maho_agent::types::CustomAgentMessage::Custom(_)
+                                )
+                            )
+                        });
+                        if requested_for_current || self.session.is_streaming() || has_turn_history
+                        {
+                            Err(
+                                "set_retry_fallback must arrive before the session's first turn."
+                                    .into(),
+                            )
+                        } else {
+                            self.session.with_settings_manager_mut(|settings| {
+                                maho_core::agent_session_runtime::apply_retry_fallback_profile(
+                                    settings, profile,
+                                );
+                            });
+                            Ok(())
+                        }
+                    } else {
+                        Err("set_retry_fallback needs retryFallback.".into())
+                    };
+                    RpcResponse {
+                        id: value["id"].as_str().map(str::to_owned),
+                        record_type: ResponseRecordType::Response,
+                        command: "set_retry_fallback".into(),
+                        session_id: value["sessionId"].as_str().map(str::to_owned),
+                        result: match outcome {
+                            Ok(()) => RpcResponseResult::Success { data: None },
+                            Err(error) => RpcResponseResult::Error {
+                                error,
+                                error_code: None,
+                                error_data: default_error_data(&self.session, "set_retry_fallback"),
+                            },
+                        },
+                    }
+                };
+                return crate::jsonl::serialize_json_line(&response).map(Some);
+            }
             let result = if let Some(error) =
                 crate::pause_command_validation::validate_pause_command(value)
             {
@@ -2962,10 +3055,18 @@ impl RpcConnectionHandler {
             && record["success"] == true
             && let Some(capabilities) = record["data"]["capabilities"].as_array()
         {
-            let capabilities = capabilities
+            let mut capabilities = capabilities
                 .iter()
                 .filter_map(|capability| capability.as_str().map(str::to_owned))
                 .collect::<Vec<_>>();
+            if self.retry_fallback_command
+                && !capabilities
+                    .iter()
+                    .any(|c| c == crate::custom_capability::RETRY_FALLBACK_COMMAND_CAPABILITY)
+            {
+                capabilities
+                    .push(crate::custom_capability::RETRY_FALLBACK_COMMAND_CAPABILITY.to_owned());
+            }
             record["data"]["capabilities"] = serde_json::json!(classic_protocol_capabilities(
                 &capabilities,
                 self.tool_runtime,
@@ -4831,6 +4932,124 @@ mod connection_events_tests {
         assert_eq!(resolved[0]["outcome"], "timed_out");
         assert_eq!(resolved[0]["requestId"], "req_timeout");
         capable.release().await;
+    }
+
+    #[tokio::test]
+    async fn retry_fallback_command_capability_and_pre_turn_profile() {
+        let session = session();
+        let (disabled, _) = handler(&session, &[]).await;
+        let info_disabled: serde_json::Value = serde_json::from_str(
+            &disabled
+                .handle_input_line(r#"{"id":"p0","type":"get_protocol_info"}"#)
+                .await
+                .expect("dispatch")
+                .expect("response"),
+        )
+        .expect("json");
+        assert_eq!(info_disabled["success"], true);
+        let caps_disabled = info_disabled["data"]["capabilities"]
+            .as_array()
+            .expect("capabilities");
+        assert!(
+            !caps_disabled
+                .iter()
+                .any(|c| c == crate::custom_capability::RETRY_FALLBACK_COMMAND_CAPABILITY)
+        );
+        let refused_disabled: serde_json::Value = serde_json::from_str(
+            &disabled
+                .handle_input_line(
+                    r#"{"id":"r0","type":"set_retry_fallback","retryFallback":{"modelFallback":true,"fallbackChains":{"anthropic/claude-haiku-4-5":["openai/gpt-5"]}}}"#,
+                )
+                .await
+                .expect("dispatch")
+                .expect("response"),
+        )
+        .expect("json");
+        assert_eq!(refused_disabled["success"], false);
+        disabled.release().await;
+
+        let (enabled, _) = handler(&session, &[]).await;
+        let enabled = enabled.with_retry_fallback_command(true);
+        let info_enabled: serde_json::Value = serde_json::from_str(
+            &enabled
+                .handle_input_line(r#"{"id":"p1","type":"get_protocol_info"}"#)
+                .await
+                .expect("dispatch")
+                .expect("response"),
+        )
+        .expect("json");
+        let caps_enabled = info_enabled["data"]["capabilities"]
+            .as_array()
+            .expect("capabilities");
+        assert!(
+            caps_enabled
+                .iter()
+                .any(|c| c == crate::custom_capability::RETRY_FALLBACK_COMMAND_CAPABILITY)
+        );
+
+        let missing: serde_json::Value = serde_json::from_str(
+            &enabled
+                .handle_input_line(r#"{"id":"r1","type":"set_retry_fallback"}"#)
+                .await
+                .expect("dispatch")
+                .expect("response"),
+        )
+        .expect("json");
+        assert_eq!(missing["success"], false);
+
+        let malformed: serde_json::Value = serde_json::from_str(
+            &enabled
+                .handle_input_line(
+                    r#"{"id":"r2","type":"set_retry_fallback","retryFallback":{"modelFallback":true,"fallbackChains":[]}}"#,
+                )
+                .await
+                .expect("dispatch")
+                .expect("response"),
+        )
+        .expect("json");
+        assert_eq!(malformed["success"], false);
+
+        let applied: serde_json::Value = serde_json::from_str(
+            &enabled
+                .handle_input_line(
+                    r#"{"id":"r3","type":"set_retry_fallback","retryFallback":{"modelFallback":true,"fallbackChains":{"anthropic/claude-haiku-4-5":["openai/gpt-5"]}}}"#,
+                )
+                .await
+                .expect("dispatch")
+                .expect("response"),
+        )
+        .expect("json");
+        assert_eq!(applied["success"], true);
+
+        let resolved = session.with_settings_manager(|s| s.get_retry_fallback_settings());
+        assert!(resolved.model_fallback);
+        assert_eq!(resolved.chains.len(), 1);
+        assert_eq!(
+            resolved.chains.get("anthropic/claude-haiku-4-5"),
+            Some(&vec!["openai/gpt-5".to_owned()])
+        );
+
+        // Once a turn command is requested for this session id, set_retry_fallback is refused.
+        *enabled
+            .turn_requested_session
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(session.session_id());
+        let after_turn: serde_json::Value = serde_json::from_str(
+            &enabled
+                .handle_input_line(
+                    r#"{"id":"r4","type":"set_retry_fallback","retryFallback":{"modelFallback":false,"fallbackChains":{}}}"#,
+                )
+                .await
+                .expect("dispatch")
+                .expect("response"),
+        )
+        .expect("json");
+        assert_eq!(after_turn["success"], false);
+        assert_eq!(
+            after_turn["error"],
+            "set_retry_fallback must arrive before the session's first turn."
+        );
+        enabled.release().await;
     }
 }
 #[cfg(test)]
