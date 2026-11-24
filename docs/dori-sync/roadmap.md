@@ -89,9 +89,9 @@ porting). Cost note from 2026-11-22: each of the four compatibility fixes took o
 | P5 | S12 terminal (background reporting, auto-reap, interrupt stops jobs) | M | P3 | done 2026-11-24 (merged into `dori/compat-20261122`) | monitor and bash session behavior matches omo 5.1.81 |
 | P6 | S10 codemode, S11 extension host/api (rest), S13 mcp, S14 webfetch/websearch | M each | P2 | done 2026-11-24 (merged into `dori/compat-20261122`) | eval kernels with permission checks, MCP OAuth continuity |
 | P7 | S06 agent durable store + execution ledger | XL | P3 | done 2026-11-24 (merged into `dori/compat-20261122`) | DurableStore contract and conformance suites pass |
-| P8 | S03 core session (store-first SessionManager, move, import, lifecycle order), S20 cli session opening | L + M | P7 | not started | sessions survive a restart the way omo's do |
+| P8 | S03 core session (store-first SessionManager, move, import, lifecycle order), S20 cli session opening | L + M | P7 | done 2026-11-24 (merged into `dori/compat-20261122`) | sessions survive a restart the way omo's do |
 | P9 | S01 + S02 rpc host daemon and compact recovery | XL | P8 | two host fixes landed (disconnect keeps the turn, `MAHO_` env) | host verbs Dori uses behave like omo 5.1.81; freeze current traces first |
-| P10 | O05 task (designated chains, child dialogs, routing resolve), O04 memory (no sync), O01 thread (local tools, wake, host-ensure) | M + L + XL | P8 (O05), P9 (O01) | not started | DAG, memory tool and thread tools match omo |
+| P10 | O05 task (designated chains, child dialogs, routing resolve), O04 memory (no sync), O01 thread (local tools, wake, host-ensure) | M + L + XL | P8 (O05), P9 (O01) | O04 memory done 2026-11-24; O05 task, O01 thread remaining | DAG, memory tool and thread tools match omo |
 | P11 | Pin move: PINS.md, `tools/golden/pin.mjs`, workflow `SENPI_PIN`, omo pin check | S | P1-P10 | not started | `bun tools/check-pins.mjs` passes at the new pins |
 
 LOW groups (O02 remote/device-service, O12 desktop, O13 other hosts, O15 web, S18/S19/S21 cosmetics, S22) stay
