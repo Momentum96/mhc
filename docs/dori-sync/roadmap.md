@@ -92,7 +92,7 @@ porting). Cost note from 2026-11-22: each of the four compatibility fixes took o
 | P8 | S03 core session (store-first SessionManager, move, import, lifecycle order), S20 cli session opening | L + M | P7 | done 2026-11-24 (merged into `dori/compat-20261122`) | sessions survive a restart the way omo's do |
 | P9 | S01 + S02 rpc host daemon and compact recovery | XL | P8 | done 2026-11-24 (merged into `dori/compat-20261122`) | host verbs Dori uses behave like omo 5.1.81; freeze current traces first |
 | P10 | O05 task (designated chains, child dialogs, routing resolve), O04 memory (no sync), O01 thread (local tools, wake, host-ensure) | M + L + XL | P8 (O05), P9 (O01) | done 2026-11-24 (merged into `dori/compat-20261122`) | DAG, memory tool and thread tools match omo |
-| P11 | Pin move: PINS.md, `tools/golden/pin.mjs`, workflow `SENPI_PIN`, omo pin check | S | P1-P10 | not started | `bun tools/check-pins.mjs` passes at the new pins |
+| P11 | Pin move: PINS.md, `tools/golden/pin.mjs`, workflow `SENPI_PIN`, omo pin check | S | P1-P10 | done 2026-11-24 (merged into `dori/compat-20261122`) | `bun tools/check-pins.mjs` passes at the new pins |
 
 LOW groups (O02 remote/device-service, O12 desktop, O13 other hosts, O15 web, S18/S19/S21 cosmetics, S22) stay
 out unless Dori starts to need them.
