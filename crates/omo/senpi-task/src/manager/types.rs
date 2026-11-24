@@ -114,7 +114,6 @@ pub struct ManagerStartSpec {
     pub admission: Option<super::start_admission::StartAdmission>,
     #[serde(skip)]
     pub resume_credential: Option<crate::pause::admission_barrier::ResumeCredential>,
-    pub parent_model: Option<String>,
     pub prompt: String,
     pub task_summary: Option<String>,
     pub parent_session_id: String,
