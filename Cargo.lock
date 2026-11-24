@@ -6004,6 +6004,7 @@ dependencies = [
  "maho-core",
  "maho-ext-api",
  "maho-ext-host",
+ "maho-machine-ops",
  "maho-test-support",
  "maho-tool-child",
  "maho-tools",
@@ -6018,6 +6019,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
+ "url",
  "uuid",
 ]
 
