@@ -1053,20 +1053,24 @@ mod unix_shims {
         assert!(r.stdout.contains("user-prompt rc=0\nuser-prompt rc=1\n"));
     }
 
+    /// `kill -0` probe: works on every unix, unlike `/proc/<pid>` (Linux only).
+    fn process_alive(pid: &str) -> bool {
+        Command::new("kill")
+            .args(["-0", pid])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success())
+    }
+
     #[test]
     fn owned_sleeper_reaps_cleanly_on_drop_and_sigterm_without_polling() {
         let sleeper = OwnedSleeper::spawn();
         let pid_str = sleeper.pid.to_string();
-        assert!(Path::new(&format!("/proc/{pid_str}")).exists());
+        assert!(process_alive(&pid_str));
         drop(sleeper);
         // After Drop kills + waits on the child, it is reaped and no longer alive.
-        let alive = Command::new("kill")
-            .args(["-0", &pid_str])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .is_ok_and(|s| s.success());
-        assert!(!alive);
+        assert!(!process_alive(&pid_str));
 
         // Process exit / trap cleanup leaves no orphan sleeper after wait().
         let temp = tempfile::tempdir().expect("tempdir");
@@ -1081,12 +1085,6 @@ mod unix_shims {
             .expect("run probe");
         assert!(status.success());
         let recorded = std::fs::read_to_string(&pid_file).expect("read pidfile");
-        let alive = Command::new("kill")
-            .args(["-0", recorded.trim()])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .is_ok_and(|s| s.success());
-        assert!(!alive);
+        assert!(!process_alive(recorded.trim()));
     }
 }
