@@ -276,8 +276,14 @@ jobs:
           case "$RUNNER_OS" in
             Linux) sudo apt-get install -y minisign ;;
             macOS) brew install minisign ;;
-            Windows) choco install minisign -y ;;
+            Windows)
+              # chocolatey ships minisign 0.8, which rejects the fixture key's KDF; use the 0.12 release build.
+              curl -fsSLo "$RUNNER_TEMP/minisign.zip" https://github.com/jedisct1/minisign/releases/download/0.12/minisign-0.12-win64.zip
+              unzip -q -o "$RUNNER_TEMP/minisign.zip" -d "$RUNNER_TEMP/minisign"
+              export PATH="$RUNNER_TEMP/minisign/minisign-win64/x86_64:$PATH"
+              ;;
           esac
+          minisign -v
           test_key=crates/maho-cli/tests/fixtures/release-test-key/test.key
           signed=0
           for archive in dist/*.tar.gz dist/*.zip dist/candidate-*/*.tar.gz dist/candidate-*/*.zip; do
