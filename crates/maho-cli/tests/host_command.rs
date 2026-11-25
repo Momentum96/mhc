@@ -1,5 +1,78 @@
 use maho_cli::cli::host_command::*;
 
+#[cfg(windows)]
+#[tokio::test]
+async fn windows_host_session_list_authenticates_and_returns_session_rows() {
+    use maho_rpc::{host_lifecycle::win32_pipe, socket_transport};
+    use serde_json::{Value, json};
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("host.sock");
+    let endpoint = path.to_str().unwrap();
+    let key_path = socket_transport::socket_secret_path(endpoint).unwrap();
+    let secret = socket_transport::create_socket_secret(std::path::Path::new(&key_path)).unwrap();
+    let address =
+        socket_transport::resolve_socket_transport_address(endpoint, "win32", Some(&secret))
+            .unwrap();
+    let mut pipe = win32_pipe::create_first_instance(&address).unwrap();
+    let (finish, finished) = tokio::sync::oneshot::channel();
+    let serve = async {
+        pipe.connect().await.unwrap();
+        socket_transport::authenticate_socket(&mut pipe, &secret)
+            .await
+            .unwrap();
+        let (read, mut write) = tokio::io::split(pipe);
+        let mut lines = BufReader::new(read).lines();
+        for (kind, data) in [
+            (
+                "list_sessions",
+                json!({"sessions":[{"sessionId":"rpc-win-test"}]}),
+            ),
+            (
+                "get_protocol_info",
+                json!({"capabilities":["detach_connection"]}),
+            ),
+            ("detach_connection", json!({"deferred":[]})),
+        ] {
+            let request: Value =
+                serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+            assert_eq!(request["type"], kind);
+            let response = json!({"type":"response","id":request["id"],"success":true,"data":data});
+            write
+                .write_all(format!("{response}\n").as_bytes())
+                .await
+                .unwrap();
+        }
+        // Leave the pipe open until the client has received and processed the detach ack.
+        finished.await.unwrap();
+    };
+    let run = async {
+        let result = tokio::process::Command::new(env!("CARGO_BIN_EXE_mhc"))
+            .args(["host", "session", "list", "--socket", endpoint, "--json"])
+            .env("HOME", dir.path())
+            .env("USERPROFILE", dir.path())
+            .env("OMO_CODING_AGENT_DIR", dir.path())
+            .kill_on_drop(true)
+            .output()
+            .await
+            .unwrap();
+        finish.send(()).unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let reply: Value = serde_json::from_slice(&result.stdout).unwrap();
+        assert_eq!(reply["sessions"][0]["sessionId"], "rpc-win-test");
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        tokio::join!(run, serve);
+    })
+    .await
+    .expect("Windows CLI completed the authenticated named-pipe round trip");
+}
+
 #[test]
 fn drain_wait_accepts_upstream_numeric_forms_but_rejects_unsafe_integers() {
     for (text, expected) in [(" 1e2 ", 100), ("0x20", 32), ("+3.0", 3)] {
