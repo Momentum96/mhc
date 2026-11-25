@@ -30,5 +30,6 @@ for name in $(compgen -e); do
 	case "$name" in OMO_* | SENPI_* | PI_* | MAHO_*) unset "$name" ;; esac
 done
 export HOME="$shadow"
+export PATH="$real_home/.local/bin:$real_home/.bun/bin:$PATH"
 export MAHO_CLAUDE_ACCOUNT_ROOT="$shadow/.omo/agent/anthropic-subscription-claude"
 exec "$mhc_bin" "$@"
