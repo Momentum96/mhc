@@ -6,7 +6,8 @@
 # agent/AGENTS.md are symlinks to the real ones, so a Dori session on either engine reads and writes one memory.
 # Claude runs through the claude CLI on the same account folders omo uses on this machine (owner decision 2026-11-25):
 # MAHO_CLAUDE_ACCOUNT_ROOT is omo's, and omo's anthropic-subscription entry is copied into mhc's auth.json on every
-# start; for claude-cli accounts its access/refresh are the sentinel placeholder, so no real token is duplicated. ChatGPT stays a separate mhc login because mhc refreshes those tokens itself.
+# start; for claude-cli accounts its access/refresh are the sentinel placeholder, so no real token is duplicated.
+# The claude binary is omo's own SDK copy when present: macOS keychain items only open for the binary that wrote them. ChatGPT stays a separate mhc login because mhc refreshes those tokens itself.
 # Remove everything: rm -rf ~/.maho ~/.local/bin/mhc
 set -euo pipefail
 real_home="$(eval echo "~$(id -un)")"
@@ -51,4 +52,9 @@ if accounts:
 PY
 fi
 export MAHO_CLAUDE_ACCOUNT_ROOT="$real_home/.omo/agent/anthropic-subscription-claude"
+if [ -z "${CLAUDE_CODE_EXECUTABLE:-}" ]; then
+	for sdk_claude in "$real_home"/.bun/install/global/node_modules/@anthropic-ai/claude-agent-sdk-*/claude; do
+		[ -x "$sdk_claude" ] && { export CLAUDE_CODE_EXECUTABLE="$sdk_claude"; break; }
+	done
+fi
 exec "$mhc_bin" "$@"
