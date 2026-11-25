@@ -1,5 +1,6 @@
 //! Port of senpi packages/coding-agent/src/core/session-file-call-keys.ts.
 
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 
 use serde_json::{Map, Value};
@@ -240,18 +241,24 @@ impl SessionFileCallKeys {
     }
 
     /// The entry as the file holds it: its persisted keys back in place.
-    pub fn decorate(&self, mut entry: Value) -> Value {
-        let Some(entry_id) = entry.get("id").and_then(Value::as_str).map(str::to_owned) else {
-            return entry;
-        };
-        let Some(keys) = self.by_entry.get(&entry_id) else {
-            return entry;
-        };
+    pub fn decorate(&self, entry: Value) -> Value {
+        self.decorate_cow(Cow::Owned(entry)).into_owned()
+    }
+
+    pub(crate) fn decorate_cow<'a>(&self, mut entry: Cow<'a, Value>) -> Cow<'a, Value> {
         if entry.get("type").and_then(Value::as_str) != Some("message") {
             return entry;
         }
+        let Some(keys) = entry
+            .get("id")
+            .and_then(Value::as_str)
+            .and_then(|id| self.by_entry.get(id))
+        else {
+            return entry;
+        };
+        let value = entry.to_mut();
         if let Some(result) = &keys.result {
-            if let Some(obj) = entry.as_object_mut() {
+            if let Some(obj) = value.as_object_mut() {
                 match result {
                     ResultCallMark::RuntimeItemKey(k) => {
                         obj.insert("runtimeItemKey".into(), Value::String(k.clone()));
@@ -264,7 +271,7 @@ impl SessionFileCallKeys {
             return entry;
         }
         if let Some(part_keys) = &keys.parts
-            && let Some(parts) = entry
+            && let Some(parts) = value
                 .get_mut("message")
                 .and_then(Value::as_object_mut)
                 .and_then(|m| m.get_mut("content"))

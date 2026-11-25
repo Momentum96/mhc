@@ -3,7 +3,8 @@
 use crate::definition::{ToolContent, ToolError, ToolFuture};
 use crate::model_only_text::model_only_text;
 use crate::truncate::{
-    DEFAULT_MAX_BYTES, TruncationOptions, TruncationResult, format_size, truncate_head,
+    DEFAULT_MAX_BYTES, TruncationOptions, TruncationResult, format_size, select_lines,
+    truncate_head,
 };
 use serde_json::{Value, json};
 use std::path::Path;
@@ -42,8 +43,7 @@ pub async fn shape_text_read(
     limit: Option<usize>,
     folder: Option<&Arc<dyn ReadFolder>>,
 ) -> Result<ShapedTextRead, ToolError> {
-    let all_lines: Vec<&str> = text_content.split('\n').collect();
-    let total_file_lines = all_lines.len();
+    let total_file_lines = text_content.split('\n').count();
     let start_line = offset.map_or(0, |o| o.saturating_sub(1));
     let start_line_display = start_line + 1;
     if start_line >= total_file_lines {
@@ -57,8 +57,9 @@ pub async fn shape_text_read(
     let end_line = limit.map_or(total_file_lines, |l| {
         start_line.saturating_add(l).min(total_file_lines)
     });
-    let selected_content = all_lines[start_line..end_line].join("\n");
-    let truncation = truncate_head(&selected_content, TruncationOptions::default());
+    let count = (end_line < total_file_lines).then_some(end_line - start_line);
+    let selected_content = select_lines(text_content, start_line, count);
+    let truncation = truncate_head(selected_content, TruncationOptions::default());
 
     let summary = if let Some(folder) = folder {
         folder
@@ -79,7 +80,11 @@ pub async fn shape_text_read(
     let output_text = if let Some(summary_text) = summary {
         summary_text
     } else if truncation.first_line_exceeds_limit {
-        let first_line_size = format_size(all_lines[start_line].len());
+        let first_line_size = format_size(
+            selected_content
+                .find('\n')
+                .unwrap_or(selected_content.len()),
+        );
         notice = Some(format!(
             "[Line {start_line_display} is {first_line_size}, exceeds {} limit. Use bash: sed -n '{start_line_display}p' {path} | head -c {DEFAULT_MAX_BYTES}]",
             format_size(DEFAULT_MAX_BYTES)
