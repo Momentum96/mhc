@@ -17,7 +17,9 @@ set "HOME=%SHADOW%"
 set "GIT_CONFIG_GLOBAL=%REAL%\.gitconfig"
 set "PATH=%REAL%\.local\bin;%REAL%\.bun\bin;%PATH%"
 set "MAHO_CLAUDE_ACCOUNT_ROOT=%REAL%\.omo\agent\anthropic-subscription-claude"
-if "%CLAUDE_CODE_EXECUTABLE%"=="" for /d %%d in ("%REAL%\.bun\install\global\node_modules\@anthropic-ai\claude-agent-sdk-win32-*") do if exist "%%d\claude.exe" set "CLAUDE_CODE_EXECUTABLE=%%d\claude.exe"
+if "%CLAUDE_CODE_EXECUTABLE%"=="" for /d %%d in ("%REAL%\.bun\install\cache\@anthropic-ai\claude-agent-sdk-win32-x64@*") do if exist "%%d\claude.exe" set "SDK_CLAUDE=%%d\claude.exe"
+if "%CLAUDE_CODE_EXECUTABLE%"=="" for /d %%d in ("%REAL%\.bun\install\global\node_modules\@anthropic-ai\claude-agent-sdk-win32-*") do if exist "%%d\claude.exe" set "SDK_CLAUDE=%%d\claude.exe"
+if "%CLAUDE_CODE_EXECUTABLE%"=="" if not "%SDK_CLAUDE%"=="" set "CLAUDE_CODE_EXECUTABLE=%SDK_CLAUDE%"
 powershell -NoProfile -ExecutionPolicy Bypass -File "%REAL%\.maho\dori-scripts\mhc-dori-sync-claude.ps1" >nul 2>&1
 if "%MHC_BIN%"=="" set "MHC_BIN=%REAL%\.maho\dist\mhc\mhc.exe"
 "%MHC_BIN%" %*
