@@ -301,9 +301,15 @@ async fn stop_host_locked(options: StopHostOptions) -> std::io::Result<StopHostO
             }
         },
     };
+    let generation = crate::host_daemon_paths::generation_paths(&paths, &instance_id);
+    #[cfg(unix)]
+    let signal_pid =
+        legacy_supervisor_target(&paths, &instance_id, &options.socket, pid)?.unwrap_or(pid);
+    #[cfg(not(unix))]
+    let signal_pid = pid;
     // The intent goes first: the supervisor that reaps the generation records an operator stop, not an outside kill.
     crate::host_stop_intent::write_stop_intent(
-        &crate::host_daemon_paths::generation_paths(&paths, &instance_id),
+        &generation,
         &crate::host_stop_intent::HostStopIntent {
             sender: crate::host_stop_intent::HostStopSender {
                 pid: std::process::id(),
@@ -311,7 +317,7 @@ async fn stop_host_locked(options: StopHostOptions) -> std::io::Result<StopHostO
                 generation: None,
             },
             chain: None,
-            target_pid: pid,
+            target_pid: signal_pid,
             reason: "operator_stop".into(),
             signal: "SIGTERM".into(),
             at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
@@ -320,13 +326,13 @@ async fn stop_host_locked(options: StopHostOptions) -> std::io::Result<StopHostO
     );
     #[cfg(unix)]
     {
-        let delivered =
-            signal_generation(pid, rustix::process::Signal::TERM).map_err(std::io::Error::from)?;
+        let delivered = signal_generation(signal_pid, rustix::process::Signal::TERM)
+            .map_err(std::io::Error::from)?;
         // A signal is not an exit: only the supervisor may release ownership after reaping its host.
-        if !delivered {
+        if !delivered && signal_pid == pid {
             crate::host_daemon_registration::release_generation(&paths, &instance_id, pid)?;
         }
-        Ok(StopHostOutcome::Stopped { pid })
+        Ok(StopHostOutcome::Stopped { pid: signal_pid })
     }
     #[cfg(windows)]
     {
@@ -344,6 +350,53 @@ async fn stop_host_locked(options: StopHostOptions) -> std::io::Result<StopHostO
             "stopping hosts is unsupported on this platform",
         ))
     }
+}
+
+/// Earlier supervisors could publish the internal child's PID as the public owner.
+/// Redirect only when this generation's child record, watcher and proven writer agree.
+#[cfg(unix)]
+fn legacy_supervisor_target(
+    paths: &crate::host_daemon_paths::HostDaemonPaths,
+    instance_id: &str,
+    socket: &str,
+    pid: u32,
+) -> std::io::Result<Option<u32>> {
+    let registration =
+        crate::host_daemon_registration::read_generation_registration(paths, instance_id)?;
+    let Some(owner) = crate::host_daemon_registration::proven_owner(registration.as_ref(), socket)
+        .filter(|owner| owner.pid == pid)
+    else {
+        return Ok(None);
+    };
+    let generation = crate::host_daemon_paths::generation_paths(paths, instance_id);
+    let marker = crate::host_stop_drain::read_drain_watch(&generation.drain_watch_file);
+    let child = crate::host_daemon_state::read_file_or_undefined(&generation.child_pid_file)?;
+    let child = crate::host_daemon_state::parse_json(child.as_deref());
+    Ok(legacy_supervisor_pid(
+        owner,
+        marker,
+        child.as_ref(),
+        crate::host_reservations::read_process_start_time,
+    ))
+}
+
+#[cfg(unix)]
+fn legacy_supervisor_pid(
+    owner: &crate::host_daemon_registration::RegisteredHost,
+    marker: Option<u32>,
+    child: Option<&serde_json::Map<String, serde_json::Value>>,
+    start_time: impl Fn(u32) -> Option<String>,
+) -> Option<u32> {
+    let supervisor = marker.filter(|pid| *pid != owner.pid)?;
+    let child = child?;
+    let writer = owner.writer.as_ref()?;
+    let recorded_child = child.get("processStartTime")?.as_str()?;
+    let recorded_writer = writer["startTime"].as_str()?;
+    (child.get("pid")?.as_u64() == Some(u64::from(owner.pid))
+        && owner.process_start_time.as_deref() == Some(recorded_child)
+        && writer["pid"].as_u64() == Some(u64::from(supervisor))
+        && start_time(supervisor).as_deref() == Some(recorded_writer))
+    .then_some(supervisor)
 }
 pub fn stop_decision(
     owner_proven: bool,
@@ -432,5 +485,36 @@ mod tests {
     #[test]
     fn process_gone_is_already_stopped() {
         assert!(!signal_generation(0, rustix::process::Signal::TERM).unwrap());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn child_registration_redirects_stop_only_to_the_same_live_supervisor() {
+        use serde_json::json;
+        let owner = crate::host_daemon_registration::RegisteredHost {
+            pid: 42,
+            process_start_time: Some("1795588516.204640".into()),
+            socket: Some("/rpc.sock".into()),
+            instance_id: "generation".into(),
+            generation: 0.0,
+            writer: Some(json!({"pid":41,"startTime":"1795588516.195258"})),
+        };
+        let child = json!({"pid":42,"processStartTime":"1795588516.204640"});
+        let current = |pid| (pid == 41).then(|| "1795588516.195258".into());
+        assert_eq!(
+            legacy_supervisor_pid(&owner, Some(41), child.as_object(), current),
+            Some(41)
+        );
+        assert_eq!(
+            legacy_supervisor_pid(&owner, Some(41), child.as_object(), |_| Some(
+                "1795588517.000000".into()
+            )),
+            None
+        );
+        assert_eq!(
+            legacy_supervisor_pid(&owner, Some(44), child.as_object(), current),
+            None
+        );
+        assert_eq!(legacy_supervisor_pid(&owner, Some(41), None, current), None);
     }
 }

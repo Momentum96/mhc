@@ -652,9 +652,11 @@ pub async fn run_host_supervisor(launch: SupervisorLaunch) -> std::io::Result<()
             crate::host_daemon_registration::write_host_registration(
                 &paths,
                 &crate::host_daemon_registration::HostRegistration {
-                    pid: child_pid,
+                    // The public listener belongs to this supervisor, which can stop and
+                    // reap the child even when the child's RPC executor is stalled.
+                    pid: std::process::id(),
                     process_start_time: crate::host_reservations::read_process_start_time(
-                        child_pid,
+                        std::process::id(),
                     ),
                     socket: public_socket,
                     instance_id,
