@@ -193,7 +193,10 @@ async fn platform_descriptors(
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-async fn platform_descriptors(_pid: u32, _names: &HashSet<String>) -> Option<PublicDescriptors> {
+async fn platform_descriptors(
+    _pid: u32,
+    _matcher: &mut PublicNameMatcher,
+) -> Option<PublicDescriptors> {
     None
 }
 
