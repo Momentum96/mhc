@@ -64,14 +64,7 @@ pub fn register_mcp_lifecycle_with_tool_search(
             service: service.clone(),
             pending_attach: Arc::new(move || {
                 let service = pending_service.clone();
-                Box::pin(async move {
-                    let deferred = service.lock().await.deferred_attach();
-                    deferred
-                        .wait(std::time::Duration::from_millis(
-                            crate::startup_race::MCP_ATTACH_SETTLE_TIMEOUT_MS,
-                        ))
-                        .await;
-                })
+                Box::pin(async move { wait_for_startup_registration(&service).await })
             }),
             append_entry: Some(Arc::new(move |message| {
                 if let Err(error) = entry_api.append_entry(
@@ -327,13 +320,7 @@ pub fn register_mcp_lifecycle_with_tool_search(
                         // Non-RPC sessions still publish the settled snapshot after the deferred race settles.
                         let publish_service = service_handle.clone();
                         let publisher = tokio::spawn(async move {
-                            // PERF-DIVERGENCE(senpi mcp index.ts): upstream awaits attach settle without any lock; this port wrapped the wait in the service Mutex guard, blocking other lockers up to 5s. Now the guard is dropped before awaiting. Output is identical.
-                            let deferred = publish_service.lock().await.deferred_attach();
-                            deferred
-                                .wait(std::time::Duration::from_millis(
-                                    crate::startup_race::MCP_ATTACH_SETTLE_TIMEOUT_MS,
-                                ))
-                                .await;
+                            wait_for_startup_registration(&publish_service).await;
                             let service = publish_service.lock().await;
                             let snapshot = service.wire_status_snapshot().await;
                             // Dropped by design when the runtime went stale before the attach settled.
@@ -434,25 +421,19 @@ pub fn register_mcp_lifecycle_with_tool_search(
                         )
                         .await;
                     }
-                    // PERF-DIVERGENCE(senpi mcp index.ts): upstream awaits `whenAttachSettled` lock-free; this port held the service Mutex across the wait. Now the guard is dropped before awaiting. Output is identical.
-                    let deferred = service.lock().await.deferred_attach();
-                    deferred
-                        .wait(std::time::Duration::from_millis(
-                            crate::startup_race::MCP_ATTACH_SETTLE_TIMEOUT_MS,
-                        ))
-                        .await;
+                    if !event.preview && !attach_flag.swap(true, Ordering::SeqCst) {
+                        attach_context(
+                            &service,
+                            ctx,
+                            registrar,
+                            tool_search,
+                            events.clone(),
+                            binding,
+                        )
+                        .await?;
+                    }
+                    wait_for_startup_registration(&service).await;
                     if !event.preview {
-                        if !attach_flag.swap(true, Ordering::SeqCst) {
-                            attach_context(
-                                &service,
-                                ctx,
-                                registrar,
-                                tool_search,
-                                events.clone(),
-                                binding,
-                            )
-                            .await?;
-                        }
                         let mut service_guard = service.lock().await;
                         service_guard.set_elicitation_ui(if ctx.has_ui {
                             Some(ctx.ui.clone())
@@ -541,6 +522,18 @@ pub fn register_mcp_lifecycle_with_tool_search(
     }
 
     service
+}
+
+async fn wait_for_startup_registration(service_handle: &tokio::sync::Mutex<McpService>) {
+    let (deferred, registration) = {
+        let service = service_handle.lock().await;
+        (service.deferred_attach(), service.deferred_registration())
+    };
+    // Registration takes the service lock and may be enqueued by a settling connect.
+    let timeout =
+        std::time::Duration::from_millis(crate::startup_race::MCP_ATTACH_SETTLE_TIMEOUT_MS);
+    deferred.wait(timeout).await;
+    registration.wait(timeout).await;
 }
 
 async fn attach_context(

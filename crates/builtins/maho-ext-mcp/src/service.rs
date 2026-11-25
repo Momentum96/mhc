@@ -119,6 +119,7 @@ pub struct McpService {
     /// Skill server warnings already reported (upstream `#skillServerWarnings`): each is shown once.
     skill_server_warnings: std::collections::BTreeSet<String>,
     deferred: Arc<crate::startup_race::McpDeferredAttach>,
+    deferred_registration: Arc<crate::startup_race::McpDeferredAttach>,
     pending_auth:
         Arc<std::sync::Mutex<BTreeMap<String, crate::auth::oauth_provider::McpOAuthProvider>>>,
     interactive_auth_servers: Arc<std::sync::Mutex<std::collections::BTreeSet<String>>>,
@@ -476,6 +477,7 @@ impl McpService {
             session_mode: None,
             skill_server_warnings: Default::default(),
             deferred: Default::default(),
+            deferred_registration: Default::default(),
             pending_auth: Arc::default(),
             interactive_auth_servers: Arc::default(),
             policy_notices: Default::default(),
@@ -926,6 +928,7 @@ impl McpService {
                 dispose_entry_connection(&connection, &self.registry, self.owner).await?;
             }
         }
+        let race_window_closed = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let mut races = Vec::new();
         for (name, server) in &config.servers {
             if server.state != McpServerState::Enabled || self.connections.contains_key(name) {
@@ -1080,6 +1083,7 @@ impl McpService {
             if let Some(cached) = &cached_catalog {
                 connection.entry.lock().await.cached_catalog = Some(cached.clone());
             }
+            let credentials_current = connection.credentials_current.clone();
             let entry_handle = connection.entry.clone();
             let shared_handle = connection.shared.clone();
             self.connections.insert(name.clone(), connection);
@@ -1100,6 +1104,8 @@ impl McpService {
                 let shared = shared_handle;
                 let self_weak = self.self_weak.clone();
                 let registration_inputs = self.registration_inputs.clone();
+                let deferred_registration = self.deferred_registration.clone();
+                let race_window_closed = race_window_closed.clone();
                 let timeout = crate::startup_race::resolve_mcp_startup_timeout_ms(
                     server_config.startup_timeout_ms,
                     env.get(crate::startup_race::MCP_STARTUP_TIMEOUT_ENV)
@@ -1109,10 +1115,27 @@ impl McpService {
                 let (reg_sender, mut reg_settled) = tokio::sync::watch::channel(false);
                 self.deferred.track(async move {
                     if let Some(shared) = shared {
-                        if let Ok(catalog) = shared.catalog().await {
-                            let mut entry = entry.lock().await;
-                            entry.cached_catalog = Some(catalog);
-                            entry.cache_refreshed_after_connect = true;
+                        match shared.catalog().await {
+                            Ok(catalog) => {
+                                let mut entry = entry.lock().await;
+                                entry.cached_catalog = Some(catalog);
+                                entry.cache_refreshed_after_connect = true;
+                            }
+                            Err(error) => {
+                                let (connection, logger) = {
+                                    let entry = entry.lock().await;
+                                    (entry.connection.clone(), entry.logger.clone())
+                                };
+                                let error = crate::health::mark_mcp_connection_needs_auth(
+                                    &connection,
+                                    &error,
+                                )
+                                .unwrap_or(error);
+                                let _ = logger
+                                    .lock()
+                                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                    .log("warning", &error.to_string(), None, None);
+                            }
                         }
                     } else if let Err(error) =
                         crate::startup_race::connect_and_refresh_mcp_catalog_unlocked(
@@ -1127,31 +1150,41 @@ impl McpService {
                             .unwrap_or_else(std::sync::PoisonError::into_inner)
                             .log("warning", &error.to_string(), None, None);
                     }
-                    // A cold/lazy server whose connect outran the attach deadline lands
-                    // its catalog here; re-register so its tools reach the next turn,
-                    // matching upstream `raceMcpStartupConnect` registering through the
-                    // captured `pi`. The connect task holds no other lock when the
-                    // registration task takes the session lock, so `settled` is not gated.
-                    if let (Some(weak), Some(inputs)) = (self_weak, registration_inputs)
-                        && let Some(service) = weak.upgrade()
+                    // Fast connects are covered by the attach's own registration. Publish late
+                    // catalogs (or resync stale credentials) outside the attach's service lock.
+                    let credentials_stale = !(credentials_current)();
+                    let settled_after_race =
+                        race_window_closed.load(std::sync::atomic::Ordering::SeqCst);
+                    if (credentials_stale || (settled_after_race && registration_inputs.is_some()))
+                        && let Some(service) = self_weak.as_ref().and_then(std::sync::Weak::upgrade)
                     {
-                        tokio::spawn(async move {
+                        deferred_registration.track(async move {
                             let mut service = service.lock().await;
-                            let mut tool_search = match &inputs.tool_search {
-                                Some(tool_search) => Some(tool_search.lock().await),
-                                None => None,
-                            };
-                            let _ = service
-                                .register_session_tools(
-                                    inputs.registrar.clone(),
-                                    tool_search.as_deref_mut(),
-                                )
-                                .await;
+                            if !(credentials_current)() {
+                                if let Err(error) = service.resync_current_config().await {
+                                    service.report_registration_error(&error.to_string());
+                                }
+                            } else if settled_after_race && let Some(inputs) = registration_inputs {
+                                let mut tool_search = match &inputs.tool_search {
+                                    Some(tool_search) => Some(tool_search.lock().await),
+                                    None => None,
+                                };
+                                if let Err(error) = service
+                                    .register_session_tools(
+                                        inputs.registrar.clone(),
+                                        tool_search.as_deref_mut(),
+                                    )
+                                    .await
+                                {
+                                    service.report_registration_error(&error.to_string());
+                                }
+                            }
                             reg_sender.send_replace(true);
                         });
                     } else {
                         reg_sender.send_replace(true);
                     }
+                    // Settle the race after enqueuing follow-up work, not after it takes the lock.
                     sender.send_replace(true);
                 });
                 if let Some(connects) = startup_connects.as_deref_mut() {
@@ -1185,6 +1218,7 @@ impl McpService {
                 .await;
             }))
             .await;
+        race_window_closed.store(true, std::sync::atomic::Ordering::SeqCst);
         let mut declared = BTreeMap::new();
         for (name, connection) in &self.connections {
             let entry = connection.entry.lock().await;
@@ -1725,6 +1759,9 @@ impl McpService {
     pub fn deferred_attach(&self) -> Arc<crate::startup_race::McpDeferredAttach> {
         self.deferred.clone()
     }
+    pub fn deferred_registration(&self) -> Arc<crate::startup_race::McpDeferredAttach> {
+        self.deferred_registration.clone()
+    }
     pub async fn wait_for_deferred_attach(
         &self,
         timeout: std::time::Duration,
@@ -2062,6 +2099,7 @@ impl McpService {
         self.session_env.clear();
         self.session_mode = None;
         self.deferred.clear();
+        self.deferred_registration.clear();
         self.startup_windows.clear();
         self.wire_status_listeners
             .lock()
