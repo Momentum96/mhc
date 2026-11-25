@@ -235,33 +235,39 @@ mod tests {
         .unwrap();
 
         let serve = tokio::spawn(async move {
-            for (kind, data) in [
-                (
-                    "get_protocol_info",
-                    json!({"protocolVersion":1, "serverVersion":"test", "capabilities":[]}),
-                ),
-                (
-                    "list_sessions",
-                    json!({"sessions":[{"sessionId":"mine","sessionPath":"/session.jsonl","name":"Title","cwd":"/project"}]}),
-                ),
-            ] {
+            loop {
                 let (socket, _) = listener.accept().await.unwrap();
                 let mut socket = tokio::io::BufReader::new(socket);
                 let mut line = String::new();
-                socket.read_line(&mut line).await.unwrap();
-                let request: Value = serde_json::from_str(&line).unwrap();
-                assert_eq!(request["type"], kind);
-                assert_eq!(request["observe"], true);
-                socket
-                    .write_all(
-                        format!(
-                            "{}\n",
-                            json!({"id":request["id"],"success":true,"data":data})
+                // Each observing connection can ask for protocol info before its actual request.
+                while socket.read_line(&mut line).await.unwrap() != 0 {
+                    let request: Value = serde_json::from_str(&line).unwrap();
+                    assert_eq!(request["observe"], true);
+                    let listing = request["type"] == "list_sessions";
+                    let data = match request["type"].as_str() {
+                        Some("get_protocol_info") => {
+                            json!({"protocolVersion":1, "serverVersion":"test", "capabilities":[]})
+                        }
+                        Some("list_sessions") => {
+                            json!({"sessions":[{"sessionId":"mine","sessionPath":"/session.jsonl","name":"Title","cwd":"/project"}]})
+                        }
+                        command => panic!("unexpected status probe: {command:?}"),
+                    };
+                    socket
+                        .write_all(
+                            format!(
+                                "{}\n",
+                                json!({"id":request["id"],"success":true,"data":data})
+                            )
+                            .as_bytes(),
                         )
-                        .as_bytes(),
-                    )
-                    .await
-                    .unwrap();
+                        .await
+                        .unwrap();
+                    if listing {
+                        return;
+                    }
+                    line.clear();
+                }
             }
         });
         let statuses = read_all_host_status(temp.path(), false, Some(1500))
