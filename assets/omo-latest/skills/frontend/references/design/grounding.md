@@ -6,7 +6,7 @@ The output is `DESIGN.md` section 9 (`design-system-architecture.md` gives the t
 
 ## 1. Guideline source, read in full
 
-Pick the authoritative sources for the platform and the domain: the platform's guidelines (Apple Human Interface Guidelines, Material 3, Fluent 2), WCAG 2.2, and the project's own `DESIGN.md`. Read every page. If a source is too large for one context (the Apple HIG runs to hundreds of pages), split it across parallel readers (a `workflow` graph, or parallel `task` children). Each reader returns the principles from its pages with their URLs. A skimmed or sampled source counts as unread.
+Pick the authoritative sources for the platform and the domain: the platform's guidelines (Apple Human Interface Guidelines, Material 3, Fluent 2), WCAG 2.2, and the project's own `DESIGN.md`. Read every page. If a source is too large for one context (the Apple HIG runs to hundreds of pages), split it across parallel readers with `/mass-ulw`, or with parallel subagents where it is unavailable. Each reader returns the principles from its pages with their URLs. A skimmed or sampled source counts as unread.
 
 ## 2. Universal principles
 
@@ -26,4 +26,4 @@ Capture the surface under work through `/visual-qa` (on a new screen, the first 
 
 ## 5. Close the ledger
 
-Plan the fixes before the first edit (`/ulw-plan` for a large ledger): each row names its fix and, in advance, the `/visual-qa` item or probe that will prove it. Then execute without stopping to ask between rows: independent rows run in parallel (a `workflow` graph, or `/ulw-execute`), each fix is a scoped pass (`SKILL.md` Verify), and a large ledger ships as several PRs grouped by screen or rule. A row closes only with its before/after pair and the passing proof, and the pairs go in the PR body. Report progress often as closed/total ledger rows, naming what closed since the last report.
+Plan the fixes before the first edit (`/ulw-plan` for a large ledger): each row names its fix and, in advance, the `/visual-qa` item or probe that will prove it. Then execute without stopping to ask between rows: independent rows run in parallel (`/mass-ulw`, `/ulw-execute`), each fix is a scoped pass (`SKILL.md` Verify), and a large ledger ships as several PRs grouped by screen or rule. A row closes only with its before/after pair and the passing proof, and the pairs go in the PR body. Report progress often as closed/total ledger rows, naming what closed since the last report.

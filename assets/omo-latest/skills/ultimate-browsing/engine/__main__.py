@@ -5,8 +5,8 @@ Usage:
     python3 -B -m engine URL [--selector CSS] [--device auto|desktop|mobile]
                              [--timeout N] [--max-attempts N] [--json] [--trace]
 
-Always pass -B: running with -m byte-compiles the package before this module
-executes, so a flag set here would come too late to stop __pycache__ writes.
+`-B` is required: `-m` compiles the package before any engine code runs, so only
+the interpreter flag keeps bytecode caches out of a signed app bundle.
 
 Examples:
     python3 -B -m engine "https://example.com/" --selector "h1"
