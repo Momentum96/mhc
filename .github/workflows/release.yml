@@ -348,6 +348,7 @@ jobs:
         run: |
           export MHC_BUILD_VERSION="${CANDIDATE_VERSION#v}"
           cargo test --release --locked -p maho-rpc --test integration --no-run
+          cargo test --release --locked -p maho-rpc --lib --no-run
           cargo test --release --locked -p maho-cli --test integration --no-run
 
       - name: test Windows candidate session transport
@@ -358,6 +359,7 @@ jobs:
           MHC_RELEASE_PUBKEY_FILE: ${{ github.workspace }}/crates/maho-cli/tests/fixtures/release-test-key/test.pub
         run: |
           export MHC_BUILD_VERSION="${CANDIDATE_VERSION#v}"
+          cargo test --release --locked -p maho-rpc --lib windows_pipe_advertises_ready_and_stopping_only_after_authentication
           cargo test --release --locked -p maho-rpc --test integration authenticated_client_sends_secret_before_correlated_protocol_request
           cargo test --release --locked -p maho-cli --test integration windows_host_session_list_authenticates_and_returns_session_rows
 

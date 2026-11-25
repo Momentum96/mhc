@@ -123,6 +123,29 @@ pub async fn proxy_with_admission_with_proof<C, I>(
     C: AsyncRead + AsyncWrite + Send + 'static,
     I: AsyncRead + AsyncWrite + Send + 'static,
 {
+    proxy_frames(client, internal, admission, launch_proven, true).await;
+}
+
+#[cfg(windows)]
+pub(crate) async fn proxy_named_pipe(
+    client: tokio::net::windows::named_pipe::NamedPipeServer,
+    internal: Option<tokio::net::windows::named_pipe::NamedPipeClient>,
+    admission: Arc<HostAdmission>,
+) {
+    // Named pipes cannot half-close: dropping both halves delivers EOF to the host.
+    proxy_frames(client, internal, admission, false, false).await;
+}
+
+async fn proxy_frames<C, I>(
+    client: C,
+    internal: Option<I>,
+    admission: Arc<HostAdmission>,
+    launch_proven: bool,
+    half_close: bool,
+) where
+    C: AsyncRead + AsyncWrite + Send + 'static,
+    I: AsyncRead + AsyncWrite + Send + 'static,
+{
     let (mut client_read, client_write) = tokio::io::split(client);
     let client_write: Writer<C> = Arc::new(tokio::sync::Mutex::new(client_write));
     let state = Arc::new(Mutex::new(Admitted::default()));
@@ -315,7 +338,7 @@ pub async fn proxy_with_admission_with_proof<C, I>(
             result = &mut requests, if !requests_done => {
                 requests_done = true;
                 // The client is gone: its hop goes with it (senpi `client.once("close")`).
-                if result.is_err() || !has_internal { return; }
+                if result.is_err() || !has_internal || !half_close { return; }
             }
             result = &mut responses => {
                 let _ = result;
