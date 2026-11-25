@@ -25,9 +25,13 @@ $spec = Join-Path $maho 'dori-mhc-launch-spec.json'
 Set-Content -LiteralPath $spec -Encoding ascii -Value '{"spec_version": 1, "core": {"session_runtime": "in-process", "multi_session": true, "extensions": []}, "tunables": {"idleExitMs": 900000, "coldStart": "persistent"}}'
 $mhc = Join-Path $bin 'mhc.cmd'
 & $mhc --version
-$action = New-ScheduledTaskAction -Execute 'cmd.exe' -Argument "/c `"$mhc`" host ensure --launch-spec `"$spec`" --json"
-$trigger = New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\$env:USERNAME"
-$principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType Interactive
+$log = Join-Path $maho 'mhc-host-task.log'
+# cmd /c drops the first and last quote of a line that starts with one, so the whole command gets an extra pair.
+$action = New-ScheduledTaskAction -Execute 'cmd.exe' -Argument "/c `"`"$mhc`" host ensure --launch-spec `"$spec`" --json > `"$log`" 2>&1`""
+# whoami, not USERDOMAIN: over ssh on a workgroup machine USERDOMAIN is WORKGROUP, which the task scheduler rejects.
+$user = (whoami)
+$trigger = New-ScheduledTaskTrigger -AtLogOn -User $user
+$principal = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive
 $settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minutes 5) -AllowStartIfOnBatteries
 Register-ScheduledTask -TaskName 'dori-mhc-host' -TaskPath '\' -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force | Out-Null
 Start-ScheduledTask -TaskName 'dori-mhc-host' -TaskPath '\'
