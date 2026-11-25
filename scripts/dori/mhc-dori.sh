@@ -5,8 +5,8 @@
 # Shared with omo (2026-11-25 owner decision): durable memory (~/.omo/memory), omo.jsonc and the global
 # agent/AGENTS.md are symlinks to the real ones, so a Dori session on either engine reads and writes one memory.
 # Claude runs through the claude CLI on the same account folders omo uses on this machine (owner decision 2026-11-25):
-# MAHO_CLAUDE_ACCOUNT_ROOT is omo's, and omo's anthropic-subscription account list (store/dirId, no tokens) is copied
-# into mhc's auth.json on every start. ChatGPT stays a separate mhc login because mhc refreshes those tokens itself.
+# MAHO_CLAUDE_ACCOUNT_ROOT is omo's, and omo's anthropic-subscription entry is copied into mhc's auth.json on every
+# start; for claude-cli accounts its access/refresh are the sentinel placeholder, so no real token is duplicated. ChatGPT stays a separate mhc login because mhc refreshes those tokens itself.
 # Remove everything: rm -rf ~/.maho ~/.local/bin/mhc
 set -euo pipefail
 real_home="$(eval echo "~$(id -un)")"
@@ -41,7 +41,7 @@ entry = json.load(open(src)).get("anthropic-subscription") or {}
 accounts = [a for a in entry.get("accounts") or [] if a.get("store") == "claude-cli"]
 if accounts:
     doc = json.load(open(dst)) if os.path.exists(dst) else {}
-    shared = {"type": entry.get("type", "oauth"), "accounts": accounts, **({"loginId": entry["loginId"]} if "loginId" in entry else {})}
+    shared = {**entry, "accounts": accounts}
     if doc.get("anthropic-subscription") != shared:
         doc["anthropic-subscription"] = shared
         tmp = dst + ".tmp"
