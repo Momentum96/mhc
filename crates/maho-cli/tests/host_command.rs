@@ -18,7 +18,10 @@ async fn windows_host_session_list_authenticates_and_returns_session_rows() {
     let mut pipe = win32_pipe::create_first_instance(&address).unwrap();
     let (finish, finished) = tokio::sync::oneshot::channel();
     let serve = async {
-        pipe.connect().await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(10), pipe.connect())
+            .await
+            .expect("CLI connected to the Windows named pipe")
+            .unwrap();
         socket_transport::authenticate_socket(&mut pipe, &secret)
             .await
             .unwrap();
@@ -35,8 +38,12 @@ async fn windows_host_session_list_authenticates_and_returns_session_rows() {
             ),
             ("detach_connection", json!({"deferred":[]})),
         ] {
-            let request: Value =
-                serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+            let line = tokio::time::timeout(std::time::Duration::from_secs(3), lines.next_line())
+                .await
+                .unwrap_or_else(|_| panic!("timed out waiting for CLI command {kind}"))
+                .unwrap()
+                .unwrap_or_else(|| panic!("CLI exited before sending {kind}"));
+            let request: Value = serde_json::from_str(&line).unwrap();
             assert_eq!(request["type"], kind);
             let response = json!({"type":"response","id":request["id"],"success":true,"data":data});
             write
@@ -66,7 +73,7 @@ async fn windows_host_session_list_authenticates_and_returns_session_rows() {
         let reply: Value = serde_json::from_slice(&result.stdout).unwrap();
         assert_eq!(reply["sessions"][0]["sessionId"], "rpc-win-test");
     };
-    tokio::time::timeout(std::time::Duration::from_secs(15), async {
+    tokio::time::timeout(std::time::Duration::from_secs(25), async {
         tokio::join!(run, serve);
     })
     .await

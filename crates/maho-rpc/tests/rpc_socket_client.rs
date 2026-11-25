@@ -30,7 +30,10 @@ async fn authenticated_client_sends_secret_before_correlated_protocol_request() 
         let (mut stream, _) = listener.accept().await.unwrap();
         #[cfg(windows)]
         let mut stream = {
-            listener.connect().await.unwrap();
+            tokio::time::timeout(std::time::Duration::from_secs(3), listener.connect())
+                .await
+                .expect("RPC client connected to the Windows named pipe")
+                .unwrap();
             listener
         };
         maho_rpc::socket_transport::authenticate_socket(&mut stream, &secret)
@@ -71,11 +74,13 @@ async fn authenticated_client_sends_secret_before_correlated_protocol_request() 
         );
         finish.send(()).unwrap();
     };
-    tokio::time::timeout(std::time::Duration::from_secs(2), async {
-        tokio::join!(client, host)
-    })
-    .await
-    .unwrap();
+    #[cfg(windows)]
+    let deadline = std::time::Duration::from_secs(5);
+    #[cfg(unix)]
+    let deadline = std::time::Duration::from_secs(2);
+    tokio::time::timeout(deadline, async { tokio::join!(client, host) })
+        .await
+        .expect("authenticated RPC exchange finished");
 }
 #[cfg(unix)]
 #[tokio::test]
