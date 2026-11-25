@@ -369,6 +369,7 @@ mod tests {
             engine_ordinal: Some([2026.0, 9.0, 16.0, 3.0, 0.0]),
             launch_profile: Some(profile(&["/plugin"])),
             memory_pressure: None,
+            runtime_build_id: None,
             path_identity_resolver: None,
             agent_dir: None,
             handover: None,

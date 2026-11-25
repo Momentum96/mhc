@@ -1,4 +1,43 @@
 use maho_cli::cli::host_command::*;
+
+#[test]
+fn drain_wait_accepts_upstream_numeric_forms_but_rejects_unsafe_integers() {
+    for (text, expected) in [(" 1e2 ", 100), ("0x20", 32), ("+3.0", 3)] {
+        let args = ["stop", "--drain", "--wait-ms", text].map(str::to_owned);
+        assert_eq!(parse_host_args(&args).unwrap().wait_ms, Some(expected));
+    }
+    for text in ["0", "1.5", "0x+1", "9007199254740992", "Infinity"] {
+        let args = ["stop", "--drain", "--wait-ms", text].map(str::to_owned);
+        assert!(parse_host_args(&args).is_err(), "{text}");
+    }
+}
+
+#[test]
+fn ensure_cannot_claim_an_extension_with_no_native_port() {
+    let temp = tempfile::tempdir().unwrap();
+    let spec = temp.path().join("spec.json");
+    std::fs::write(
+        temp.path().join("arbitrary-unported-script.ts"),
+        "export default () => {};",
+    )
+    .unwrap();
+    std::fs::write(&spec, r#"{"spec_version":1,"core":{"session_runtime":"worker","multi_session":true,"extensions":["arbitrary-unported-script.ts"]}}"#).unwrap();
+    let args = ["ensure", "--launch-spec", spec.to_str().unwrap()].map(str::to_owned);
+    let parsed = parse_host_args(&args).unwrap();
+    let Err(error) =
+        maho_cli::cli::host_request::build_host_request(&parsed, "unused.sock", temp.path())
+    else {
+        panic!("a launch request must not claim an unported extension");
+    };
+    assert_eq!(error.exit_code(), 1);
+    assert_eq!(error.payload()["reason"], "host_error");
+    assert!(
+        error.payload()["detail"]
+            .as_str()
+            .unwrap()
+            .contains("has no native port")
+    );
+}
 #[test]
 fn host_options_parse_and_last_policy_wins() {
     let args = [

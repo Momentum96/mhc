@@ -1,4 +1,5 @@
 use crate::host_protocol_info::HostProtocolInfo;
+use crate::host_status_rows::{HostSessionRow, parse_session_rows};
 use serde::Serialize;
 use serde_json::Value;
 #[derive(Debug, Default, Serialize, PartialEq, Eq)]
@@ -11,24 +12,20 @@ pub struct HostSessionCounts {
     pub foreign_retained: usize,
 }
 pub fn session_counts(reply: &Value) -> HostSessionCounts {
-    let mut counts = HostSessionCounts::default();
-    if let Some(rows) = reply.get("sessions").and_then(Value::as_array) {
-        for row in rows.iter().filter(|row| row.is_object()) {
-            counts.total += 1;
-            if row.get("kind").and_then(Value::as_str) == Some("worker") {
-                counts.worker += 1;
-            } else {
-                counts.interactive += 1;
-            }
-            if row.get("attachments").and_then(Value::as_f64).unwrap_or(0.) > 0. {
-                counts.foreign_attached += 1;
-            } else {
-                counts.retained += 1;
-                counts.foreign_retained += 1;
-            }
-        }
+    count_sessions(&parse_session_rows(reply))
+}
+fn count_sessions(rows: &[HostSessionRow]) -> HostSessionCounts {
+    let worker = rows.iter().filter(|row| row.kind == "worker").count();
+    let attached = rows.iter().filter(|row| row.attachments > 0.).count();
+    let retained = rows.len() - attached;
+    HostSessionCounts {
+        total: rows.len(),
+        interactive: rows.len() - worker,
+        worker,
+        retained,
+        foreign_attached: attached,
+        foreign_retained: retained,
     }
-    counts
 }
 /// The occupancy a stop decision is made on. An observing read: looking must never keep a host from idling out.
 pub async fn read_session_counts(socket: &str, include_workers: bool) -> HostSessionCounts {
@@ -61,6 +58,7 @@ pub fn host_summary(host: Option<&HostProtocolInfo>) -> Value {
             serde_json::json!({
                 "protocolVersion": host.protocol_version,
                 "serverVersion": host.server_version,
+                "lifecycle": host_lifecycle(Some(host)),
                 "capabilities": host.capabilities,
                 "instanceId": host.instance_id,
                 "generation": host.generation,
@@ -86,7 +84,27 @@ pub async fn read_host_status_with(
     prune: bool,
     timeout_ms: u64,
 ) -> std::io::Result<Value> {
-    // The host's key record lives under its own agent dir; a looker that names it proves the key from there.
+    Ok(
+        probe_host_status(socket, agent_dir, include_workers, prune, timeout_ms)
+            .await?
+            .report,
+    )
+}
+
+/// The report can fall back to disk for display; routing must use the actual socket answer.
+pub(crate) struct HostStatusProbe {
+    pub report: Value,
+    pub answered: Option<HostProtocolInfo>,
+    pub listing: Vec<HostSessionRow>,
+}
+
+pub(crate) async fn probe_host_status(
+    socket: &str,
+    agent_dir: &std::path::Path,
+    include_workers: bool,
+    prune: bool,
+    timeout_ms: u64,
+) -> std::io::Result<HostStatusProbe> {
     crate::host_probe::with_rpc_key_root(
         crate::host_probe::rpc_key_root(None, Some(agent_dir)),
         read_host_status_in_key_root(socket, agent_dir, include_workers, prune, timeout_ms),
@@ -99,7 +117,7 @@ async fn read_host_status_in_key_root(
     include_workers: bool,
     prune: bool,
     timeout_ms: u64,
-) -> std::io::Result<Value> {
+) -> std::io::Result<HostStatusProbe> {
     let paths = crate::host_daemon_paths::create_host_daemon_paths(socket, agent_dir);
     // Both reads observe: looking at a host must never be what keeps it from idling out.
     let answered = crate::host_probe::request_on_socket(
@@ -147,20 +165,18 @@ async fn read_host_status_in_key_root(
         host.lifecycle == Some(crate::host_protocol_info::HostLifecycle::Stopping)
     });
     let listing = if silent_or_stopping {
-        Value::Null
+        Vec::new()
     } else {
-        read_session_listing(socket, include_workers, timeout_ms).await
+        parse_session_rows(&read_session_listing(socket, include_workers, timeout_ms).await)
     };
-    let sessions = session_counts(&listing);
+    let sessions = count_sessions(&listing);
     let claims = crate::host_status_rows::read_claim_rows(&paths, &generations);
     let env_keys = crate::host_daemon_env::read_daemon_env_keys(&paths)?;
-    let identity = answered.as_ref().zip(host.as_ref());
-    let mut report = serde_json::json!({"reachable":host.is_some(),"socket":socket,"pid":current.map(|row|row.pid),"processStartTime":process_start_time,"instanceId":host.as_ref().and_then(|host|host.instance_id.as_deref()).or_else(||current.map(|row|row.instance_id.as_str())),"generation":host.as_ref().and_then(|host|host.generation).or_else(||current.map(|row|row.generation)),"engineVersion":host.as_ref().and_then(|host|host.engine_version.as_deref()).or_else(||current.and_then(|row|row.engine_version.as_deref())),"capabilities":host.as_ref().map(|host|host.capabilities.as_slice()).unwrap_or(&[]),"launchProfile":host.as_ref().and_then(|host|host.launch_profile.as_ref()),"sessions":sessions,"zombies":metrics.zombies,"rss_mb":metrics.rss_mb,"host_rss_mb":metrics.host_rss_mb,"host_footprint_mb":metrics.host_footprint_mb,"open_fds":metrics.open_fds,"env_keys":env_keys,"generations":generations,"pointer":pointer});
+    let mut report = serde_json::json!({"reachable":host.is_some(),"socket":socket,"pid":current.map(|row|row.pid),"processStartTime":process_start_time,"instanceId":host.as_ref().and_then(|host|host.instance_id.as_deref()).or_else(||current.map(|row|row.instance_id.as_str())),"generation":host.as_ref().and_then(|host|host.generation).or_else(||current.map(|row|row.generation)),"engineVersion":host.as_ref().and_then(|host|host.engine_version.as_deref()).or_else(||current.and_then(|row|row.engine_version.as_deref())),"capabilities":host.as_ref().map(|host|host.capabilities.as_slice()).unwrap_or(&[]),"launchProfile":host.as_ref().and_then(|host|host.launch_profile.as_ref()),"sessions":sessions,"zombies":metrics.zombies,"rss_mb":metrics.rss_mb,"host_rss_mb":metrics.host_rss_mb,"host_footprint_mb":metrics.host_footprint_mb,"open_fds":metrics.open_fds,"env_keys":env_keys,"generations":generation_status_rows(&generations),"pointer":pointer});
     report["lifecycle"] = host_lifecycle(host.as_ref()).into();
-    report["runtimeBuildId"] = identity
-        .and_then(|(data, _)| {
-            crate::runtime_build_id::parse_runtime_build_id(&data["runtimeBuildId"])
-        })
+    report["runtimeBuildId"] = host
+        .as_ref()
+        .and_then(|host| host.runtime_build_id.as_deref())
         .into();
     report["handover"] = host
         .as_ref()
@@ -185,15 +201,34 @@ async fn read_host_status_in_key_root(
     );
     report["claims_live"] = claims.iter().filter(|claim| claim.live).count().into();
     if include_workers {
-        report["session_rows"] =
-            serde_json::to_value(crate::host_status_rows::parse_session_rows(&listing))
-                .unwrap_or_else(|_| serde_json::json!([]));
+        report["session_rows"] = serde_json::json!(listing);
         report["claims"] = serde_json::to_value(&claims).unwrap_or_else(|_| serde_json::json!([]));
     } else {
         report["session_rows"] = serde_json::json!([]);
         report["claims"] = serde_json::json!([]);
     }
-    Ok(report)
+    Ok(HostStatusProbe {
+        report,
+        answered: host,
+        listing,
+    })
+}
+
+pub(crate) fn generation_status_rows(
+    generations: &[crate::host_generations::HostGenerationRow],
+) -> Vec<Value> {
+    generations
+        .iter()
+        .map(|row| {
+            let mut status = serde_json::json!(row);
+            status["unit"] = serde_json::json!(if row.alive {
+                crate::host_unit_placement::read_host_unit(row.pid, Some(&row.instance_id))
+            } else {
+                None
+            });
+            status
+        })
+        .collect()
 }
 /// The answering host's lifecycle (`ready` / `stopping`); `None` when nothing answers or it predates the field.
 fn host_lifecycle(host: Option<&HostProtocolInfo>) -> Option<&'static str> {

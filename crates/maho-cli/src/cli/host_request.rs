@@ -211,6 +211,17 @@ pub fn build_host_request(
     match parsed.subcommand {
         HostSubcommand::Ensure => {
             let spec = resolve_launch_spec(parsed.spec_path.as_deref())?;
+            // The loader guarantees trusted, existing paths, not that Rust can load arbitrary JS.
+            // Use the same resolver as the child rather than publishing a half-loaded profile.
+            if let Some(path) = spec.host_args.chunks_exact(2).find_map(|pair| {
+                let [flag, path] = pair else { return None };
+                (flag == "--extension" && !super::user_extensions::is_native_extension_path(path))
+                    .then_some(path)
+            }) {
+                return Err(HostCommandError::Host(format!(
+                    "launch spec extension {path} has no native port; mhc cannot load arbitrary JavaScript or TypeScript extensions"
+                )));
+            }
             let policy = decision_policy(&parsed.policy);
             let request = ensure_request(&target, &spec, policy)?;
             Ok(HostRequest::Ensure {

@@ -283,6 +283,7 @@ pub mod host_successor_startup;
 pub mod host_supersession;
 pub mod host_supervisor_log;
 pub mod host_supervisor_poll;
+mod host_unit_placement;
 pub mod host_warm;
 pub mod host_watchdog;
 pub mod host_zero_session_trim;

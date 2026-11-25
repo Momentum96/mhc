@@ -85,6 +85,12 @@ with the real paths it touched.
 | EXEC-EVAL | `crates/maho-core/src/dynamic_prompt/workstation.rs` (`executor_phrase`), `crates/builtins/maho-ext-prompt-preset/tests/native_baseline.rs` | The workstation instruction names every selected executor: "`bash` and `eval` execute on this workstation" | When `eval` is selected, bash runs only as `tool.bash(...)` inside eval cells (`exposure: Eval`), so the instruction names `eval` alone and never advertises a top-level tool the model cannot call (upstream mhc 1acc11feb). The native-baseline test maps the phrase back before hashing | Name every selected executor in `executor_phrase` |
 | S07-PRESET | `crates/builtins/maho-ext-prompt-preset/src/index.rs` | The prompt-preset hooks forward `fullToolPrompt` from the session's prompt options to full-section presets (senpi#5665) | The extension API's `BuildSystemPromptOptions` has no `full_tool_prompt` yet, so full-section presets (Opus, Fable) list the session's tool snippets and guidelines, as upstream does when the field is absent | Carry `full_tool_prompt` through `BuildSystemPromptOptions` and forward it in `builder_input` |
 
+### Dori host CLI forward port
+
+| ID | Files | Upstream | mhc behavior | Restore pinned behavior with |
+|---|---|---|---|---|
+| DORI-HOST-61125 | `crates/maho-cli/src/cli/host_*.rs`, `crates/maho-rpc/src/{connection_handler,host_*,multi_session_host,session_registry,worker_session_registry}.rs` | Dori targets senpi `v2026.11.23` (`47333c26c`), ahead of `PINS.md` | Apply the newer host and session CLI contract in this scope only. Native process diagnostics and capability values still describe mhc, not the JavaScript engine. | Revert the scoped host CLI parity change. |
+
 ## Further reading
 
 - [docs/parity.md](parity.md) — Upstream parity tracking and verification

@@ -13,6 +13,9 @@ const TRANSIENT_DAEMON_ENV_NAMES: &[&str] = &[
     "SENPI_PY_KERNEL_PARENT_PID",
     "SENPI_RPC_HOST_WATCH_FD",
     "SENPI_RPC_HOST_WATCH_PPID",
+    "SENPI_RPC_HOST_WATCH_PSTART",
+    "SENPI_RPC_HOST_WATCH_PSTART_TICKS",
+    "SENPI_RPC_HOST_LIFETIME_FIFO",
     "SENPI_RPC_HOST_SCRATCH_DIR",
     "SENPI_RPC_HOST_CLEANUP_PATHS",
     "SENPI_RPC_HOST_PUBLIC_SOCKET",
@@ -21,6 +24,9 @@ const TRANSIENT_DAEMON_ENV_NAMES: &[&str] = &[
     "SENPI_RPC_HOST_DAEMON_DIR",
     "SENPI_RPC_HOST_EXPECTED_RUNTIME_BUILD_ID",
     "SENPI_RPC_HOST_STARTUP_EVENTS",
+    "SENPI_RPC_SOCKET_SECRET_FILE",
+    "SENPI_RPC_ORIGIN_HOST_INSTANCE",
+    "SENPI_RPC_CLIENT_CAPABILITIES",
     "SENPI_ENGINE_TRUST",
     "SENPI_ENGINE_TRUST_HOP",
 ];
@@ -32,11 +38,12 @@ pub fn is_transient_daemon_env_name(name: &str) -> bool {
             .strip_prefix("MAHO_")
             .or_else(|| name.strip_prefix("SENPI_"))
             .is_some_and(|suffix| {
-                TRANSIENT_DAEMON_ENV_NAMES.iter().any(|transient| {
-                    transient
-                        .split_once('_')
-                        .is_some_and(|(_, rest)| rest == suffix)
-                })
+                suffix.starts_with("RPC_INTERNAL_KEY")
+                    || TRANSIENT_DAEMON_ENV_NAMES.iter().any(|transient| {
+                        transient
+                            .split_once('_')
+                            .is_some_and(|(_, rest)| rest == suffix)
+                    })
             })
 }
 
@@ -90,6 +97,8 @@ pub fn daemon_env_is_allowed(name: &str, platform: &str) -> bool {
         "HTTP_PROXY",
         "HTTPS_PROXY",
         "NO_PROXY",
+        "BSK_HOME",
+        "BSK_BIN",
     ]
     .contains(&name)
         || [
@@ -137,6 +146,7 @@ pub fn daemon_env_overrides(
     overrides.extend(
         spec_env
             .iter()
+            .filter(|(name, _)| daemon_env_is_allowed(name, platform))
             .map(|(name, value)| (name.clone(), Some(value.clone()))),
     );
     overrides
@@ -149,7 +159,11 @@ pub fn daemon_env_keys(
     process_env
         .keys()
         .filter(|name| daemon_env_is_allowed(name, platform))
-        .chain(spec_env.keys())
+        .chain(
+            spec_env
+                .keys()
+                .filter(|name| daemon_env_is_allowed(name, platform)),
+        )
         .cloned()
         .collect::<BTreeSet<_>>()
         .into_iter()
@@ -272,17 +286,22 @@ mod tests {
             ("CI_TOKEN".into(), Some("value".into())),
             ("DATABASE_URL".into(), None),
         ]);
-        let spec = BTreeMap::from([("CI_TOKEN".into(), "explicit".into())]);
+        let spec = BTreeMap::from([
+            ("SENPI_OFFLINE".into(), "1".into()),
+            ("CI_TOKEN".into(), "explicit".into()),
+            ("SENPI_RPC_INTERNAL_KEY_STDIN".into(), "1".into()),
+        ]);
         assert_eq!(
             daemon_env_overrides(&process, &spec, "linux"),
             BTreeMap::from([
-                ("CI_TOKEN".into(), Some("explicit".into())),
-                ("DATABASE_URL".into(), None)
+                ("CI_TOKEN".into(), None),
+                ("DATABASE_URL".into(), None),
+                ("SENPI_OFFLINE".into(), Some("1".into())),
             ])
         );
         assert_eq!(
             daemon_env_keys(&process, &spec, "linux"),
-            vec!["CI_TOKEN", "PATH"]
+            vec!["PATH", "SENPI_OFFLINE"]
         );
     }
 }

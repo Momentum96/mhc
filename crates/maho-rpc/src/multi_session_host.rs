@@ -1998,9 +1998,14 @@ impl HostCore {
                 let mut sessions = self.list_rows(include_workers.unwrap_or(false)).await;
                 let kernels =
                     maho_core::memory_report::kernel_registry_read::read_codemode_kernel_rows();
+                let generation =
+                    crate::protocol_identity::host_generation(&std::env::vars().collect());
+                let instance_id = crate::protocol_identity::host_instance_id();
                 for row in &mut sessions {
                     let memory = session_memory(&kernels, row["sessionId"].as_str().unwrap_or(""));
                     row["memory"] = memory;
+                    row["generation"] = generation.into();
+                    row["hostInstanceId"] = instance_id.into();
                 }
                 self.success(
                     connection,

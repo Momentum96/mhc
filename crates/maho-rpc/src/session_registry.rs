@@ -605,6 +605,7 @@ impl RpcSessionRegistry {
         self.settle_open(handle, false);
     }
     pub fn list_sessions(&self, include_workers: bool) -> Vec<serde_json::Value> {
+        let now = crate::connection_handler::now_ms();
         self.entries
             .iter()
             .filter(|(_, entry)| {
@@ -628,6 +629,7 @@ impl RpcSessionRegistry {
                     "sessionId": handle,
                     "cwd": entry.runtime.as_ref().map_or_else(|| entry.profile.runtime.cwd.clone(), |runtime| runtime.session().cwd()),
                     "status": status,
+                    "idleMs": (now - entry.last_command_at).max(0.0),
                     "attachments": entry.close.attachments.max(0),
                     "retain_on_disconnect": entry.close.retain_on_disconnect,
                     "kind": if entry.identity.kind == maho_ext_api::SessionKind::Worker { "worker" } else { "interactive" },
@@ -969,6 +971,7 @@ mod tests {
         let mut registry = registry_with(RpcSessionState::Open, 0);
         registry.get_for_command("rpc-1", "get_state", 5.).unwrap();
         assert_eq!(registry.get("rpc-1").unwrap().last_command_at, 0.);
+        assert!(registry.list_sessions(false)[0]["idleMs"].is_number());
         registry.get_for_command("rpc-1", "prompt", 6.).unwrap();
         assert_eq!(registry.get("rpc-1").unwrap().last_command_at, 6.);
         let mut attached = registry_with(RpcSessionState::Open, 1);

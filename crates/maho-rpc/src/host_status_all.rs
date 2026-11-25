@@ -10,6 +10,8 @@ use crate::host_endpoints::{
     EndpointKind, HostEndpointEntry, endpoint_probe_timeout_ms, judge_endpoint_liveness,
     list_host_endpoints,
 };
+use crate::host_status::{HostSessionCounts, generation_status_rows, probe_host_status};
+use futures::{StreamExt, stream};
 use serde_json::{Value, json};
 use std::path::Path;
 
@@ -38,23 +40,25 @@ pub async fn read_all_host_status_with(
     stale_engine: &crate::host_gc::StaleEngineRequest,
 ) -> std::io::Result<Vec<Value>> {
     let endpoints = list_host_endpoints(agent_dir);
-    let mut rows = Vec::with_capacity(endpoints.len());
-    for batch in endpoints.chunks(STATUS_ALL_MAX_IN_FLIGHT) {
-        let reads = futures::future::join_all(batch.iter().map(|endpoint| {
-            endpoint_status(
-                endpoint,
-                agent_dir,
-                include_workers,
-                timeout_ms,
-                stale_engine,
+    let mut rows: Vec<_> = stream::iter(endpoints.iter().enumerate())
+        .map(|(index, endpoint)| async move {
+            (
+                index,
+                endpoint_status(
+                    endpoint,
+                    agent_dir,
+                    include_workers,
+                    timeout_ms,
+                    stale_engine,
+                )
+                .await,
             )
-        }))
+        })
+        .buffer_unordered(STATUS_ALL_MAX_IN_FLIGHT)
+        .collect()
         .await;
-        for row in reads {
-            rows.push(row?);
-        }
-    }
-    Ok(rows)
+    rows.sort_unstable_by_key(|(index, _)| *index);
+    rows.into_iter().map(|(_, row)| row).collect()
 }
 async fn endpoint_status(
     endpoint: &HostEndpointEntry,
@@ -64,9 +68,9 @@ async fn endpoint_status(
     stale_engine: &crate::host_gc::StaleEngineRequest,
 ) -> std::io::Result<Value> {
     let paths = crate::host_daemon_paths::host_daemon_directory_paths(&endpoint.dir);
-    let (mut report, answered) = match &endpoint.socket {
+    let (mut report, answered, listing) = match &endpoint.socket {
         Some(socket) => {
-            let report = crate::host_status::read_host_status_with(
+            let probe = probe_host_status(
                 socket,
                 agent_dir,
                 include_workers,
@@ -74,9 +78,7 @@ async fn endpoint_status(
                 endpoint_probe_timeout_ms(endpoint.endpoint_kind, timeout_ms),
             )
             .await?;
-            let answered = report["reachable"] == true;
-            let instance = report["instanceId"].as_str().map(str::to_owned);
-            (report, answered.then_some(instance))
+            (probe.report, probe.answered, probe.listing)
         }
         None => {
             let generations = crate::host_generations::read_generation_rows_with(
@@ -90,18 +92,42 @@ async fn endpoint_status(
                     crate::host_pointer_election::HostPointerState::current(row.instance_id.clone())
                 },
             );
-            let claims_live =
-                crate::host_reservations::read_session_path_claims(&paths.reservations_dir).len();
+            let claims_live = crate::host_status_rows::read_claim_rows(&paths, &generations)
+                .iter()
+                .filter(|claim| claim.live)
+                .count();
+            let crashes = crate::host_crash_record::read_host_crash_records(&paths.dir)
+                .iter()
+                .filter(|record| crate::host_crash_record::is_host_crash(record))
+                .count();
             (
-                json!({"reachable":false,"socket":null,"pid":null,"processStartTime":null,"instanceId":null,"generation":null,"engineVersion":null,"capabilities":[],"launchProfile":null,"sessions":{"total":0,"interactive":0,"worker":0,"retained":0,"foreign_attached":0,"foreign_retained":0},"zombies":null,"rss_mb":null,"host_rss_mb":null,"host_footprint_mb":null,"open_fds":null,"memory_pressure":null,"path_identity_resolver":null,"env_keys":[],"generations":generations,"pointer":pointer,"claims_live":claims_live}),
+                json!({
+                    "reachable": false, "lifecycle": null, "socket": null, "pid": null,
+                    "processStartTime": null, "instanceId": null, "generation": null,
+                    "engineVersion": null, "capabilities": [], "launchProfile": null,
+                    "runtimeBuildId": null, "handover": null, "sessions": HostSessionCounts::default(),
+                    "zombies": null, "rss_mb": null, "host_rss_mb": null, "host_footprint_mb": null,
+                    "open_fds": null, "memory_pressure": null, "path_identity_resolver": null,
+                    "env_keys": [], "generations": generation_status_rows(&generations), "pointer": pointer,
+                    "crashes": crashes, "shard": null, "session_rows": [], "claims_live": claims_live, "claims": [],
+                }),
                 None,
+                Vec::new(),
             )
         }
     };
-    let verdict = judge_endpoint_liveness(&paths, answered.as_ref().map(Option::as_deref));
+    let verdict = judge_endpoint_liveness(
+        &paths,
+        answered.as_ref().map(|host| host.instance_id.as_deref()),
+    );
     let tui = endpoint.endpoint_kind == EndpointKind::Tui;
     let owner = if tui {
-        json!({"pid":report["generations"].as_array().and_then(|rows|rows.iter().find(|row|row["current"]==true)).and_then(|row|row["pid"].as_u64()),"cwd":null,"session":null})
+        let row = listing.first();
+        json!({
+            "pid": report["generations"].as_array().and_then(|rows| rows.iter().find(|row| row["current"] == true)).and_then(|row| row["pid"].as_u64()),
+            "cwd": row.and_then(|row| row.cwd.as_deref()),
+            "session": row.map(|row| json!({"id":row.id,"path":row.session_path,"name":row.name})),
+        })
     } else {
         Value::Null
     };
@@ -170,6 +196,93 @@ mod tests {
             (nameless["identity"].clone(), nameless["reachable"].clone()),
             (json!("unknown"), json!(false))
         );
+        for field in [
+            "lifecycle",
+            "runtimeBuildId",
+            "handover",
+            "crashes",
+            "shard",
+            "session_rows",
+            "claims",
+        ] {
+            assert!(nameless.get(field).is_some(), "{field}");
+        }
         assert!(paths.dir.exists(), "status --all must remove nothing");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn answering_tui_without_instance_stays_unroutable_but_names_owner_session() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+        let temp = tempfile::tempdir().unwrap();
+        let socket = temp.path().join("t.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let socket = socket.to_str().unwrap();
+        let paths = crate::host_daemon_paths::create_host_daemon_paths(socket, temp.path());
+        crate::host_daemon_paths::create_daemon_directories(&paths).unwrap();
+        std::fs::write(
+            &paths.endpoint_file,
+            json!({"socket":socket,"endpoint_kind":"tui"}).to_string(),
+        )
+        .unwrap();
+        std::fs::write(&paths.pointer_file, r#"{"instance_id":"recorded"}"#).unwrap();
+        let generation = crate::host_daemon_paths::generation_paths(&paths, "recorded");
+        std::fs::create_dir_all(&generation.dir).unwrap();
+        std::fs::write(
+            &generation.pid_file,
+            json!({"pid":std::process::id(),"generation":1}).to_string(),
+        )
+        .unwrap();
+
+        let serve = tokio::spawn(async move {
+            for (kind, data) in [
+                (
+                    "get_protocol_info",
+                    json!({"protocolVersion":1, "serverVersion":"test", "capabilities":[]}),
+                ),
+                (
+                    "list_sessions",
+                    json!({"sessions":[{"sessionId":"mine","sessionPath":"/session.jsonl","name":"Title","cwd":"/project"}]}),
+                ),
+            ] {
+                let (socket, _) = listener.accept().await.unwrap();
+                let mut socket = tokio::io::BufReader::new(socket);
+                let mut line = String::new();
+                socket.read_line(&mut line).await.unwrap();
+                let request: Value = serde_json::from_str(&line).unwrap();
+                assert_eq!(request["type"], kind);
+                assert_eq!(request["observe"], true);
+                socket
+                    .write_all(
+                        format!(
+                            "{}\n",
+                            json!({"id":request["id"],"success":true,"data":data})
+                        )
+                        .as_bytes(),
+                    )
+                    .await
+                    .unwrap();
+            }
+        });
+        let statuses = read_all_host_status(temp.path(), false, Some(1500))
+            .await
+            .unwrap();
+        let row = &statuses[0];
+        assert_eq!(row["reachable"], true);
+        assert_eq!(
+            row["instanceId"], "recorded",
+            "the report may fall back to disk"
+        );
+        assert_eq!(
+            row["alive"], false,
+            "routing requires the socket's instance"
+        );
+        assert_eq!(row["reason"], "live_unresponsive");
+        assert_eq!(row["session_rows"], json!([]));
+        assert_eq!(
+            row["owner"],
+            json!({"pid":std::process::id(),"cwd":"/project","session":{"id":"mine","path":"/session.jsonl","name":"Title"}})
+        );
+        serve.await.unwrap();
     }
 }

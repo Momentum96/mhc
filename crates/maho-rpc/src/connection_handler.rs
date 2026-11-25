@@ -653,9 +653,14 @@ pub fn build_rpc_session_state_with_dialogs(
     // manager's cached copy) and always publishes the session manager's accumulated usage totals.
     let project_trusted = project_trusted(&session.agent_dir(), session.cwd());
     let usage_totals = session.with_session_manager(|manager| manager.usage_totals().clone());
+    let mut lifecycle = session.lifecycle_snapshot();
+    crate::lifecycle_delivery::observe_lifecycle(&mut lifecycle);
     let mut state = serde_json::json!({
         "model":session.model(),
+        "pendingModelSwitch":session.pending_model_switch().map(|switch|serde_json::json!({"provider":switch.model.provider,"id":switch.model.id})),
         "thinkingLevel":session.thinking_level(),
+        "sessionModelThinkingLevels":session.get_session_model_thinking_levels(),
+        "lifecycle":lifecycle,
         "serviceTier":session.effective_service_tier().map(|tier|match tier{maho_ext_api::ServiceTier::Auto=>"auto",maho_ext_api::ServiceTier::Flex=>"flex",maho_ext_api::ServiceTier::Priority=>"priority", maho_ext_api::ServiceTier::Ultrafast=>"ultrafast"}),
         "fastMode":session.is_fast_mode_active(),
         "isStreaming":session.is_streaming(),
@@ -703,6 +708,9 @@ pub fn build_rpc_session_state_with_dialogs(
     }
     if let Some(abort_source) = last_abort_source {
         state["lastAbortSource"] = abort_source.into();
+    }
+    if let Some(turn_id) = session.current_turn_id() {
+        state["currentTurnId"] = turn_id.into();
     }
     if let Some(context_usage) = session.get_context_usage() {
         state["contextUsage"] = serde_json::json!({"tokens":context_usage.tokens,"contextWindow":context_usage.context_window,"percent":context_usage.percent});
@@ -3048,6 +3056,12 @@ impl RpcConnectionHandler {
         {
             // senpi `pendingDialogs`: the live dialog frames belong to this connection's request store.
             record["data"]["pendingDialogs"] = self.ui.pending_dialogs().into();
+            record["data"]["pendingQuestions"] = self
+                .questions
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .pending_questions(now_ms() as u64)
+                .into();
             return crate::jsonl::serialize_json_line(&record).map(Some);
         }
         if kind == Some("get_protocol_info")

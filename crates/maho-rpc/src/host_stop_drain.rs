@@ -12,6 +12,7 @@
 //! Anything else is refused (`drain_unsupported`). `wait_ms` turns the request into "drained and gone": the
 //! answer then says whether the process exited within the bound, judged only on positive evidence (the pid
 //! is gone, or now names a different process); an identity that cannot be read is not an exit.
+pub use crate::host_stop_intent::read_drain_watch;
 use crate::{
     host_daemon_paths::{HostDaemonPaths, generation_paths},
     host_daemon_registration::RegisteredHost,
@@ -94,6 +95,10 @@ pub fn read_generation_registration(
 }
 /// The pid a legacy (pre-generation) record proves for this endpoint, when its start time still matches.
 pub fn proven_legacy_owner(paths: &HostDaemonPaths, socket: &str) -> Option<u32> {
+    proven_legacy_identity(paths, socket).map(|(pid, _)| pid)
+}
+
+fn proven_legacy_identity(paths: &HostDaemonPaths, socket: &str) -> Option<(u32, String)> {
     let record = crate::host_daemon_registration::read_legacy_host_record(paths)?;
     let pid = record
         .get("pid")
@@ -108,17 +113,8 @@ pub fn proven_legacy_owner(paths: &HostDaemonPaths, socket: &str) -> Option<u32>
             crate::host_ensure::normalize_socket_path(recorded)
                 == crate::host_ensure::normalize_socket_path(socket)
         });
-    (same_endpoint && read_process_start_time(pid).as_deref() == Some(recorded)).then_some(pid)
-}
-/// The advertised watcher pid of a generation's supervisor, or nothing: such a generation cannot be asked this way.
-pub fn read_drain_watch(file: &Path) -> Option<u32> {
-    let text = std::fs::read_to_string(file).ok()?;
-    let parsed: Value = serde_json::from_str(&text).ok()?;
-    parsed
-        .get("pid")
-        .and_then(Value::as_u64)
-        .filter(|pid| *pid > 0)
-        .and_then(|pid| u32::try_from(pid).ok())
+    (same_endpoint && read_process_start_time(pid).as_deref() == Some(recorded))
+        .then(|| (pid, recorded.to_owned()))
 }
 /// Records a drain request for whoever polls `file`. Atomic: a reader sees no request or a whole one.
 pub fn write_drain_request(
@@ -127,15 +123,15 @@ pub fn write_drain_request(
     sender_kind: &str,
     reason: &str,
 ) -> io::Result<()> {
-    let record = serde_json::json!({"sender":{"pid":sender_pid,"kind":sender_kind},"reason":reason,"at":chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis,true),"nonce":uuid::Uuid::new_v4().to_string()});
-    let temp = file.with_extension(format!("{}.tmp", uuid::Uuid::new_v4().simple()));
-    std::fs::write(
-        &temp,
-        serde_json::to_vec(&record).map_err(io::Error::other)?,
-    )?;
-    std::fs::rename(&temp, file).inspect_err(|_| {
-        let _ = std::fs::remove_file(&temp);
-    })
+    crate::host_stop_intent::write_drain_request(
+        file,
+        &crate::host_stop_intent::HostStopSender {
+            pid: sender_pid,
+            kind: sender_kind.into(),
+            generation: None,
+        },
+        reason,
+    )
 }
 pub async fn drain_host(
     paths: &HostDaemonPaths,
@@ -181,10 +177,14 @@ pub async fn drain_host(
             reason: "unknown_owner",
         });
     }
-    let pid = match owner {
-        Some(owner) => Some(owner.pid),
-        None => proven_legacy_owner(paths, &options.socket),
+    let legacy = if owner.is_none() {
+        proven_legacy_identity(paths, &options.socket)
+    } else {
+        None
     };
+    let pid = owner
+        .map(|owner| owner.pid)
+        .or_else(|| legacy.as_ref().map(|(pid, _)| *pid));
     let Some(pid) = pid else {
         return Ok(DrainHostResult::Refuse {
             reason: "unknown_owner",
@@ -197,8 +197,9 @@ pub async fn drain_host(
     .await;
     // SIGUSR1 terminates a process that installed no handler for it: only a POSIX host that advertises the drain,
     // and that is the generation being asked, is signalled.
-    let answers_as_target = named.is_none_or(|named| {
-        host.as_ref().and_then(|host| host.instance_id.as_deref()) == Some(named)
+    let answers_as_target = owner.is_none_or(|owner| {
+        host.as_ref().and_then(|host| host.instance_id.as_deref())
+            == Some(owner.instance_id.as_str())
     });
     let capable = host.as_ref().is_some_and(|host| {
         host.capabilities
@@ -208,6 +209,20 @@ pub async fn drain_host(
     if !capable || !answers_as_target || cfg!(windows) {
         return Ok(DrainHostResult::Refuse {
             reason: "drain_unsupported",
+        });
+    }
+    // The probe can take seconds. Don't send SIGUSR1 to a pid recycled while it was in flight.
+    let still_proven = match owner {
+        Some(owner) => {
+            crate::host_daemon_registration::proven_owner(Some(owner), &options.socket).is_some()
+        }
+        None => legacy.is_some_and(|(_, start)| {
+            read_process_start_time(pid).as_deref() == Some(start.as_str())
+        }),
+    };
+    if !still_proven {
+        return Ok(DrainHostResult::Refuse {
+            reason: "unknown_owner",
         });
     }
     signal_drain(pid)?;
@@ -246,10 +261,11 @@ async fn wait_for_exit(pid: u32, start_time: Option<&str>, wait_ms: u64) -> bool
         if exited_now(pid, start_time, process_is_live, read_process_start_time) {
             return true;
         }
-        if tokio::time::Instant::now() >= deadline {
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
             return false;
         }
-        tokio::time::sleep(Duration::from_millis(EXIT_POLL_MS)).await;
+        tokio::time::sleep_until(deadline.min(now + Duration::from_millis(EXIT_POLL_MS))).await;
     }
 }
 /// Exit judged only on positive evidence: the pid is gone, or its start time now differs from the recorded one.
@@ -315,6 +331,14 @@ mod tests {
         );
         assert_eq!(record["reason"], "operator_drain");
         assert!(record["nonce"].is_string());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&file).unwrap().permissions().mode() & 0o077,
+                0
+            );
+        }
         let missing = temp.path().join("gone").join("drain-request.json");
         assert_eq!(
             write_drain_request(&missing, 1, "stop", "x")
@@ -322,6 +346,14 @@ mod tests {
                 .kind(),
             io::ErrorKind::NotFound
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(start_paused = true)]
+    async fn short_wait_does_not_sleep_the_full_poll_interval() {
+        let started = tokio::time::Instant::now();
+        assert!(!wait_for_exit(std::process::id(), None, 5).await);
+        assert_eq!(started.elapsed(), Duration::from_millis(5));
     }
     #[test]
     fn drain_watch_names_a_positive_pid_only() {

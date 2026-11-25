@@ -191,10 +191,21 @@ pub async fn ensure_outcome(
     request: EnsureRequest,
 ) -> std::io::Result<HostOutcome> {
     let before = crate::host_probe::probe_protocol_info(socket, 10000).await;
+    let client_profile =
+        request.client.launch_profile.as_ref().map(|profile| {
+            crate::runtime_build_id::RuntimeBuildIdInput::from_profile(&profile.core)
+        });
     if request.policy == crate::host_decision::HostDecisionPolicy::Fallback
         && let crate::host_decision::HostDecision::Fallback { reason, .. } =
             crate::host_decision::decide_host_action(
-                &request.client,
+                &crate::host_decision::HostDecisionClient {
+                    launch_profile: None,
+                    required_capabilities: crate::host_decision::REQUIRED_HOST_CAPABILITIES
+                        .iter()
+                        .map(|capability| (*capability).into())
+                        .collect(),
+                    ..request.client.clone()
+                },
                 before.as_ref(),
                 request.policy,
             )
@@ -268,6 +279,27 @@ pub async fn ensure_outcome(
             .map_err(|error| error.source)?;
     }
     let mut payload = identity_payload(socket, pid, host.as_ref());
+    add_unit_payload(&mut payload, pid, host.as_ref());
+    let client_runtime_build_id = if let Some(input) = client_profile {
+        match tokio::task::spawn_blocking(move || {
+            crate::runtime_build_id::compute_runtime_build_id(&input)
+        })
+        .await
+        {
+            Ok(Ok(id)) => Some(id),
+            Ok(Err(error)) => {
+                eprintln!("host: runtime identity unreadable: {error}");
+                None
+            }
+            Err(error) => {
+                eprintln!("host: runtime identity unavailable: {error}");
+                None
+            }
+        }
+    } else {
+        None
+    };
+    payload["clientRuntimeBuildId"] = client_runtime_build_id.into();
     payload["action"] = ensure_action(reused, before.as_ref(), host.as_ref()).into();
     payload["reused"] = reused.into();
     Ok(HostOutcome {
@@ -302,6 +334,7 @@ pub async fn handoff_outcome(
                 .map_err(|error| error.source)?;
             let pid = successor.child.id().unwrap_or_default();
             let mut payload = identity_payload(socket, pid, Some(&successor.protocol));
+            add_unit_payload(&mut payload, pid, Some(&successor.protocol));
             payload["action"] = "handoff".into();
             payload["reused"] = false.into();
             Ok(HostOutcome {
@@ -310,6 +343,20 @@ pub async fn handoff_outcome(
             })
         }
     }
+}
+fn add_unit_payload(payload: &mut serde_json::Value, pid: u32, host: Option<&HostProtocolInfo>) {
+    let unit = crate::host_unit_placement::read_host_unit(
+        pid,
+        host.and_then(|host| host.instance_id.as_deref()),
+    );
+    if let Some(name) = unit
+        .as_ref()
+        .filter(|unit| !unit.own)
+        .and_then(|unit| unit.name.as_deref())
+    {
+        payload["lifetime_tied_to"] = name.into();
+    }
+    payload["unit"] = serde_json::json!(unit);
 }
 /// The registration the operator saw and authorized (senpi `HostStopGeneration`), shared with `host_stop`.
 pub use crate::host_stop_generation::{
@@ -386,7 +433,7 @@ pub fn identity_payload(
             crate::host_protocol_info::HostLifecycle::Ready => "ready",
             crate::host_protocol_info::HostLifecycle::Stopping => "stopping",
         });
-    serde_json::json!({"socket":socket,"pid":pid,"lifecycle":lifecycle,"instanceId":host.and_then(|host|host.instance_id.as_ref()),"generation":host.and_then(|host|host.generation),"engineVersion":host.and_then(|host|host.engine_version.as_ref()),"engineOrdinal":host.and_then(|host|host.engine_ordinal),"capabilities":host.map_or(&[][..],|host|host.capabilities.as_slice()),"launchProfileId":host.and_then(|host|host.launch_profile.as_ref()).map(|profile|&profile.profile_id),"upgradeable":decision["upgradeable"]})
+    serde_json::json!({"socket":socket,"pid":pid,"lifecycle":lifecycle,"instanceId":host.and_then(|host|host.instance_id.as_ref()),"generation":host.and_then(|host|host.generation),"engineVersion":host.and_then(|host|host.engine_version.as_ref()),"engineOrdinal":host.and_then(|host|host.engine_ordinal),"capabilities":host.map_or(&[][..],|host|host.capabilities.as_slice()),"launchProfileId":host.and_then(|host|host.launch_profile.as_ref()).map(|profile|&profile.profile_id),"runtimeBuildId":host.and_then(|host|host.runtime_build_id.as_deref()),"upgradeable":decision["upgradeable"]})
 }
 pub async fn status_outcome(
     socket: &str,
@@ -626,14 +673,16 @@ mod tests {
         assert_eq!(one.payload["endpoints"].as_array().map(Vec::len), Some(2));
     }
     #[test]
-    fn identity_payload_names_the_host_lifecycle() {
+    fn identity_payload_names_the_host_lifecycle_and_running_build() {
+        let runtime = format!("sha256:{}", "f".repeat(64));
         let host = crate::host_protocol_info::parse_host_protocol_info(
-            &serde_json::json!({"serverVersion":"1","capabilities":[],"lifecycle":"stopping","instanceId":"i"}),
+            &serde_json::json!({"serverVersion":"1","capabilities":[],"lifecycle":"stopping","instanceId":"i","runtimeBuildId":runtime}),
         )
         .unwrap();
         let payload = identity_payload("s", 7, Some(&host));
         assert_eq!(payload["lifecycle"], "stopping");
         assert_eq!(payload["instanceId"], "i");
+        assert_eq!(payload["runtimeBuildId"], runtime);
         assert!(identity_payload("s", 7, None)["lifecycle"].is_null());
     }
     #[test]
