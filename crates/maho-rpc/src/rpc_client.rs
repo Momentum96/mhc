@@ -692,8 +692,18 @@ impl RpcClient {
     /// Bring the transport up: connect to `options.socket_path`, or ensure a host serves the
     /// default endpoint for the agent directory.
     pub async fn start(&self) -> RpcClientResult<()> {
+        self.start_with_public_proof(false).await
+    }
+
+    /// `host session` talks to the public endpoint; prove its key before sending session commands.
+    pub(crate) async fn start_public(&self) -> RpcClientResult<()> {
+        self.start_with_public_proof(true).await
+    }
+
+    async fn start_with_public_proof(&self, prove_endpoint: bool) -> RpcClientResult<()> {
         #[cfg(not(unix))]
         {
+            let _ = prove_endpoint;
             Err(
                 std::io::Error::other("rpc host sockets are not supported on this platform yet")
                     .into(),
@@ -725,7 +735,36 @@ impl RpcClient {
                     std::path::PathBuf::from(ensured.socket)
                 }
             };
-            let stream = tokio::net::UnixStream::connect(&path).await?;
+            let stream = if prove_endpoint {
+                let endpoint = path.to_str().ok_or_else(|| {
+                    std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid RPC endpoint")
+                })?;
+                let mut first = serde_json::json!({"type":"get_protocol_info","observe":true});
+                if let Some(origin) = crate::host_observe_request::process_origin_host_instance() {
+                    first[crate::host_observe_request::ORIGIN_HOST_INSTANCE_FIELD] = origin.into();
+                }
+                let (socket, info) = crate::host_probe::authenticated_host_socket(
+                    endpoint,
+                    &first,
+                    crate::socket_transport::SOCKET_HANDSHAKE_TIMEOUT_MS,
+                    self.options.agent_dir.as_deref(),
+                )
+                .await
+                .map_err(|error| match error.downcast::<std::io::Error>() {
+                    Ok(io) => *io,
+                    Err(error) => std::io::Error::other(error),
+                })?;
+                if info["success"] != true {
+                    return Err(std::io::Error::other(format!(
+                        "RPC authentication probe refused on {endpoint}: {}",
+                        info["error"].as_str().unwrap_or("unknown error")
+                    ))
+                    .into());
+                }
+                socket.into_stream()?
+            } else {
+                tokio::net::UnixStream::connect(&path).await?
+            };
             self.attach(stream)?;
             Ok(())
         }

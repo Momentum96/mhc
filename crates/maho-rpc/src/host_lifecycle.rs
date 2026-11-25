@@ -139,6 +139,13 @@ pub async fn wait_for_idle_exit(
         }
     }
 }
+
+async fn wait_for_policy_idle_exit(
+    policy: &HostLifecyclePolicy,
+    activity: tokio::sync::watch::Receiver<HostActivity>,
+) -> Result<(), tokio::sync::watch::error::RecvError> {
+    wait_for_idle_exit(policy.effective_idle_exit_ms(), activity).await
+}
 #[cfg(unix)]
 pub async fn proxy_connection(
     mut client: tokio::net::UnixStream,
@@ -771,13 +778,7 @@ pub async fn run_host_supervisor(launch: SupervisorLaunch) -> std::io::Result<()
     // idle decision does. The public proxy does not classify clients, so every live client is attached here: owner
     // quiescence still needs zero clients.
     let activity = std::sync::Arc::new(std::sync::Mutex::new(
-        crate::host_lifecycle_activity::SupervisorActivity::new(
-            if policy.cold_start == "persistent" {
-                f64::INFINITY
-            } else {
-                policy.idle_exit_ms
-            },
-        ),
+        crate::host_lifecycle_activity::SupervisorActivity::new(policy.effective_idle_exit_ms()),
     ));
     // senpi `SupervisorOwner`: an ensured generation (or a launch carrying `--owner-fd`) binds its lifetime owner;
     // a direct launch without an owner record has none. The owner leaving a quiescent host ends this generation.
@@ -936,7 +937,7 @@ pub async fn run_host_supervisor(launch: SupervisorLaunch) -> std::io::Result<()
         connections_tx,
     );
     tokio::pin!(proxy);
-    let idle = wait_for_idle_exit(policy.idle_exit_ms, activity_rx);
+    let idle = wait_for_policy_idle_exit(&policy, activity_rx);
     tokio::pin!(idle);
     let mut draining = false;
     let mut signal_code: Option<i32> = None;
@@ -1224,6 +1225,16 @@ fn signal_name(signal: i32) -> String {
 pub struct HostLifecyclePolicy {
     pub cold_start: String,
     pub idle_exit_ms: f64,
+}
+impl HostLifecyclePolicy {
+    /// senpi `SupervisorActivity`: persistence overrides the configured idle window, not the owner ticker.
+    fn effective_idle_exit_ms(&self) -> f64 {
+        if self.cold_start == "persistent" {
+            f64::INFINITY
+        } else {
+            self.idle_exit_ms
+        }
+    }
 }
 pub const INTERNAL_HOST_DIR_PREFIX: &str = "senpi-rpc-host-internal-";
 const SHORT_TEMP_ROOT: &str = "/tmp";
@@ -1766,6 +1777,29 @@ mod tests {
         assert_eq!(decider.update(0, 1, 99.), IdleExitDecision::Active);
         assert_eq!(decider.update(0, 0, 100.), IdleExitDecision::Idle);
         assert_eq!(decider.update(0, 0, 200.), IdleExitDecision::Exit);
+    }
+    #[tokio::test(start_paused = true)]
+    async fn persistent_policy_cannot_idle_exit_after_last_client_detaches() {
+        use std::time::Duration;
+        for (cold_start, should_exit) in [("persistent", false), ("transient", true)] {
+            let policy = resolve_host_policy(
+                &serde_json::json!({"coldStart":cold_start,"idleExitMs":900000}),
+                &HashMap::new(),
+            );
+            let (publisher, activity) = tokio::sync::watch::channel(HostActivity {
+                connections: 1,
+                active_turns: 0,
+            });
+            let mut idle = std::pin::pin!(wait_for_policy_idle_exit(&policy, activity));
+            assert!(futures::poll!(&mut idle).is_pending());
+            publisher.send_replace(HostActivity::default());
+            assert!(futures::poll!(&mut idle).is_pending());
+            let elapsed = tokio::time::timeout(Duration::from_secs(1_801), idle).await;
+            assert!(
+                matches!((should_exit, elapsed), (true, Ok(Ok(()))) | (false, Err(_))),
+                "{cold_start} supervisor took the wrong exit path"
+            );
+        }
     }
     #[test]
     fn policy_precedence_and_invalid_fallback() {
