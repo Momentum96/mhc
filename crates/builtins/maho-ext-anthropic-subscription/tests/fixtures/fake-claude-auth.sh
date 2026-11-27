@@ -34,7 +34,7 @@ case "$MODE" in
 esac
 case "$MODE" in
     hang) IFS= read -r ignored; exit 2 ;;
-    closed-stdin) exec /usr/bin/cat "$HOME/blocked" ;;
+    closed-stdin) exec /bin/cat "$HOME/blocked" ;;
     paste|silent)
         IFS= read -r code || exit 2
         printf '%s\n' "$code" >> "$RECORD"
