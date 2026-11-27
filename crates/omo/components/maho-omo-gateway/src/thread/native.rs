@@ -51,7 +51,9 @@ use super::tools::ports::{ThreadToolSurfaceOptions, UNKNOWN_CALLER};
 use super::tools::{BuiltLocalTools, build_local_thread_tools};
 use super::types::GatewayDeliveryMode;
 use super::wake::host_ensure::{EngineHostEnsureOptions, engine_host_ensure};
-use super::wake::runtime::{RunningThreadWake, ThreadWakeOptions, start_thread_wake_at_session};
+use super::wake::runtime::{
+    RunningThreadWake, ThreadWakeOptions, start_thread_wake_at_session, take_and_run,
+};
 
 pub struct NativeThreadComponent;
 
@@ -919,15 +921,11 @@ impl Extension for NativeThreadComponent {
                         let mut blocks = Vec::new();
                         for name in names {
                             let Some(skill) = skills.iter().find(|s| s.name == name) else {
-                                let mut warned = st
-                                    .warned_skills
-                                    .lock()
-                                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                                if warned.insert(name.clone()) {
+                                warn_initial_skill_once(&st.warned_skills, &name, || {
                                     diagnostic(&format!(
                                         "thread: initial skill {name} is not in this session's skills; it is not applied"
                                     ));
-                                }
+                                });
                                 continue;
                             };
                             let cached = st
@@ -947,15 +945,11 @@ impl Extension for NativeThreadComponent {
                                         b
                                     }
                                     Err(err) => {
-                                        let mut warned = st
-                                            .warned_skills
-                                            .lock()
-                                            .unwrap_or_else(std::sync::PoisonError::into_inner);
-                                        if warned.insert(name.clone()) {
+                                        warn_initial_skill_once(&st.warned_skills, &name, || {
                                             diagnostic(&format!(
                                                 "thread: initial skill {name} could not be read: {err}"
                                             ));
-                                        }
+                                        });
                                         continue;
                                     }
                                 },
@@ -1222,32 +1216,22 @@ impl Extension for NativeThreadComponent {
                     let tc_mut_input = &mut tc.input;
                     let resolved_slot = slot.clone();
                     let resolved_target_fut = async move {
-                        let Some(st) = resolved_slot
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner)
-                            .clone()
-                        else {
+                        let state = {
+                            resolved_slot
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .clone()
+                        };
+                        let Some(st) = state else {
                             return MonitorTargetResolution::Keep;
                         };
                         resolve_monitor_target(&st.surface, &raw_target, &caller).await
                     };
-                    let _ = tc_mut_input;
                     Box::pin(async move {
-                        match resolved_target_fut.await {
-                            MonitorTargetResolution::Refused(fail) => {
-                                Ok(EventResult::ToolCall(ToolCallEventResult {
-                                    block: Some(true),
-                                    reason: Some(format!(
-                                        "{}: {} {}",
-                                        fail.code, fail.message, fail.next_action
-                                    )),
-                                    terminate: None,
-                                }))
-                            }
-                            MonitorTargetResolution::Keep | MonitorTargetResolution::Target(_) => {
-                                Ok(EventResult::None)
-                            }
-                        }
+                        Ok(apply_monitor_resolution(
+                            tc_mut_input,
+                            resolved_target_fut.await,
+                        ))
                     })
                 }),
             );
@@ -1352,14 +1336,7 @@ impl Extension for NativeThreadComponent {
                         if let Some(dispose) = control_dispose {
                             let _ = dispose().await;
                         }
-                        if let Some(wake) = st
-                            .wake
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner)
-                            .take()
-                        {
-                            wake.stop();
-                        }
+                        take_and_run(&st.wake, |wake| wake.stop());
                         (st.built.dispose)();
                         let _ = st.store.clear_endpoint(&st.durable_id, &st.incarnation);
                         let returned = returned_at_close(&entries);
@@ -1371,5 +1348,60 @@ impl Extension for NativeThreadComponent {
                 }),
             );
         }
+    }
+}
+
+fn warn_initial_skill_once(warned: &Mutex<HashSet<String>>, name: &str, report: impl FnOnce()) {
+    let should_report = warned
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(name.to_owned());
+    if should_report {
+        report();
+    }
+}
+
+fn apply_monitor_resolution(input: &mut Value, resolution: MonitorTargetResolution) -> EventResult {
+    match resolution {
+        MonitorTargetResolution::Refused(fail) => EventResult::ToolCall(ToolCallEventResult {
+            block: Some(true),
+            reason: Some(format!(
+                "{}: {} {}",
+                fail.code, fail.message, fail.next_action
+            )),
+            terminate: None,
+        }),
+        MonitorTargetResolution::Target(target) => {
+            input["target"] = Value::String(target);
+            EventResult::None
+        }
+        MonitorTargetResolution::Keep => EventResult::None,
+    }
+}
+
+#[cfg(test)]
+mod monitor_resolution_tests {
+    use super::*;
+
+    #[test]
+    fn initial_skill_warning_allows_reentry_and_reports_once() {
+        let warned = Mutex::new(HashSet::new());
+        warn_initial_skill_once(&warned, "missing", || {
+            assert!(warned.try_lock().is_ok(), "warning callback held the mutex");
+        });
+        warn_initial_skill_once(&warned, "missing", || {
+            panic!("the same skill warning must only be reported once");
+        });
+    }
+
+    #[test]
+    fn resolved_monitor_target_reaches_tool_input() {
+        let mut input = serde_json::json!({"type":"rpc", "target":"alias"});
+        let result = apply_monitor_resolution(
+            &mut input,
+            MonitorTargetResolution::Target("resolved-id".into()),
+        );
+        assert!(matches!(result, EventResult::None));
+        assert_eq!(input["target"], "resolved-id");
     }
 }

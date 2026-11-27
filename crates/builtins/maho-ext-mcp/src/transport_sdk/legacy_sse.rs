@@ -95,7 +95,9 @@ impl McpClient {
             return Err("invalid SSE JSON-RPC message");
         }
         if message.get("method").and_then(Value::as_str).is_some() {
-            let _ = self.notifications.send(message);
+            self.notifications
+                .send(message)
+                .map_err(|_| "SSE JSON-RPC message has no receiver")?;
         } else if let Some(id) = message.get("id").and_then(Value::as_u64) {
             let reply = if let Some(error) = message.get("error") {
                 // The peer can echo the full endpoint or credentials in message/data.
@@ -109,11 +111,15 @@ impl McpClient {
                     err.cause = Some(Box::new(serde_json::json!({"code":code})));
                 }
                 Err(err)
+            } else if let Some(result) = message.get_mut("result") {
+                Ok(result.take())
             } else {
-                Ok(message
-                    .get_mut("result")
-                    .ok_or("missing SSE JSON-RPC result")?
-                    .take())
+                Err(failure(
+                    &self.server,
+                    McpErrorKind::Protocol,
+                    "missing SSE JSON-RPC result",
+                    "request",
+                ))
             };
             if let Some(sender) = self
                 .pending
@@ -121,7 +127,9 @@ impl McpClient {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .remove(&id)
             {
-                let _ = sender.send(reply);
+                sender
+                    .send(reply)
+                    .map_err(|_| "SSE JSON-RPC reply receiver was dropped")?;
             }
         }
         Ok(())
@@ -230,10 +238,11 @@ impl LegacySse {
                         }
                         if kind.is_empty() || kind == "message" {
                             let Ok(value) = serde_json::from_str(&data) else {
-                                break;
+                                maho_ext_api::diagnostic("MCP SSE received malformed JSON");
+                                continue;
                             };
-                            if owner.sse_message(value).is_err() {
-                                break;
+                            if let Err(error) = owner.sse_message(value) {
+                                maho_ext_api::diagnostic(error);
                             }
                         }
                     }
@@ -319,7 +328,8 @@ impl LegacySse {
             if let Some(challenge) = challenge {
                 let provider = refresh.provider();
                 provider.escalate_scopes(&challenge.scopes);
-                if let Some(handler) = owner.auth_challenge_handler.read().await.clone() {
+                let handler = owner.auth_challenge_handler.read().await.clone();
+                if let Some(handler) = handler {
                     let scopes = provider.effective_scopes().unwrap_or(challenge.scopes);
                     handler
                         .reauthorize(scopes)
@@ -499,5 +509,54 @@ impl EventStream {
             }
             line.clear();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[tokio::test]
+    async fn malformed_reply_fails_only_its_request() {
+        let root = tempfile::tempdir().unwrap();
+        let logger = Arc::new(Mutex::new(
+            McpLogger::new("fixture", root.path(), None).unwrap(),
+        ));
+        let spec = McpTransportSpec::Http {
+            url: "http://127.0.0.1/events".parse().unwrap(),
+            headers: Default::default(),
+        };
+        let client = McpClient::materialize_sse("fixture", &spec, logger)
+            .await
+            .unwrap();
+        let (bad_tx, bad_rx) = tokio::sync::oneshot::channel();
+        let (good_tx, good_rx) = tokio::sync::oneshot::channel();
+        client.pending.lock().unwrap().insert(1, bad_tx);
+        client.pending.lock().unwrap().insert(2, good_tx);
+
+        assert!(client.sse_message(json!({"jsonrpc":"2.0","id":1})).is_ok());
+        assert!(bad_rx.await.unwrap().is_err());
+        assert!(
+            client
+                .sse_message(json!({"jsonrpc":"2.0","id":2,"result":{"ok":true}}))
+                .is_ok()
+        );
+        assert_eq!(good_rx.await.unwrap().unwrap()["ok"], true);
+        assert!(!*client.closed.borrow());
+
+        assert!(
+            client
+                .sse_message(json!({"jsonrpc":"2.0","id":"server","method":"unknown/method"}))
+                .is_err()
+        );
+        let (dropped_tx, dropped_rx) = tokio::sync::oneshot::channel();
+        client.pending.lock().unwrap().insert(3, dropped_tx);
+        drop(dropped_rx);
+        assert!(
+            client
+                .sse_message(json!({"jsonrpc":"2.0","id":3,"result":{}}))
+                .is_err()
+        );
     }
 }

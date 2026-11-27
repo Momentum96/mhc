@@ -10,6 +10,7 @@ pub mod input_admission_read;
 pub mod input_effects;
 pub mod parent_link;
 pub mod pinned_model_equivalence;
+pub mod remote_cloud;
 pub mod retry_fallback_profile;
 pub mod rpc;
 pub mod rpc_host;
