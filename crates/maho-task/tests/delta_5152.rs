@@ -768,6 +768,7 @@ async fn d8_reused_pid_is_not_signalled() {
 async fn d8_real_child_is_signalled() {
     let fx = Fixture::new();
     let mut child = tokio::process::Command::new("sh")
+        .kill_on_drop(true)
         .args([
             "-c",
             "while :; do sleep 1; done",
@@ -777,14 +778,22 @@ async fn d8_real_child_is_signalled() {
         .spawn()
         .expect("sh");
     let pid = child.id().expect("pid");
-    // Between `spawn` and `exec` the child is still a copy of this test process, so
-    // `/proc/<pid>/cmdline` reads empty or as the parent's and carries no `--session-id`.
-    // `is_task_child` decides by reading that file, so cancel must not be asked before the exec
-    // lands: on a loaded machine the pre-exec read reports `signalled: false`.
+    // Wait for exec to publish the session id before asking the manager to cancel.
+    // Use ps so the readiness probe also works on macOS, which has no /proc.
+    let pid_arg = pid.to_string();
     tokio::time::timeout(LIMIT, async {
-        while !std::fs::read(format!("/proc/{pid}/cmdline"))
-            .is_ok_and(|raw| String::from_utf8_lossy(&raw).contains("--session-id"))
-        {
+        loop {
+            let command_line = tokio::process::Command::new("ps")
+                .args(["-ww", "-p", &pid_arg, "-o", "command="])
+                .output()
+                .await
+                .expect("ps");
+            if command_line.status.success()
+                && String::from_utf8_lossy(&command_line.stdout)
+                    .contains("--session-id child-session")
+            {
+                break;
+            }
             tokio::task::yield_now().await;
         }
     })
