@@ -74,6 +74,7 @@ jobs:
             runner: windows-2025
             protoc: win64
             exe: .exe
+            timeout: 120
     runs-on: ${{ matrix.runner }}
     timeout-minutes: ${{ matrix.timeout || 90 }}
     defaults:
@@ -276,8 +277,14 @@ jobs:
           case "$RUNNER_OS" in
             Linux) sudo apt-get install -y minisign ;;
             macOS) brew install minisign ;;
-            Windows) choco install minisign -y ;;
+            Windows)
+              # chocolatey ships minisign 0.8, which rejects the fixture key's KDF; use the 0.12 release build.
+              curl -fsSLo "$RUNNER_TEMP/minisign.zip" https://github.com/jedisct1/minisign/releases/download/0.12/minisign-0.12-win64.zip
+              unzip -q -o "$RUNNER_TEMP/minisign.zip" -d "$RUNNER_TEMP/minisign"
+              export PATH="$RUNNER_TEMP/minisign/minisign-win64/x86_64:$PATH"
+              ;;
           esac
+          minisign -v
           test_key=crates/maho-cli/tests/fixtures/release-test-key/test.key
           signed=0
           for archive in dist/*.tar.gz dist/*.zip dist/candidate-*/*.tar.gz dist/candidate-*/*.zip; do
@@ -330,6 +337,31 @@ jobs:
             dist/candidate-*/*.zip*
             dist/candidate-*/*.minisig
           retention-days: 7
+
+      # Upload signed candidate packages before tests so a timeout cannot block delivery.
+      - name: build Windows candidate session regression tests
+        if: runner.os == 'Windows' && env.CANDIDATE_VERSION != ''
+        timeout-minutes: 55
+        env:
+          MHC_RELEASE_CHANNEL: candidate
+          MHC_RELEASE_PUBKEY_FILE: ${{ github.workspace }}/crates/maho-cli/tests/fixtures/release-test-key/test.pub
+        run: |
+          export MHC_BUILD_VERSION="${CANDIDATE_VERSION#v}"
+          cargo test --release --locked -p maho-rpc --test integration --no-run
+          cargo test --release --locked -p maho-rpc --lib --no-run
+          cargo test --release --locked -p maho-cli --test integration --no-run
+
+      - name: test Windows candidate session transport
+        if: runner.os == 'Windows' && env.CANDIDATE_VERSION != ''
+        timeout-minutes: 5
+        env:
+          MHC_RELEASE_CHANNEL: candidate
+          MHC_RELEASE_PUBKEY_FILE: ${{ github.workspace }}/crates/maho-cli/tests/fixtures/release-test-key/test.pub
+        run: |
+          export MHC_BUILD_VERSION="${CANDIDATE_VERSION#v}"
+          cargo test --release --locked -p maho-rpc --lib windows_pipe_advertises_ready_and_stopping_only_after_authentication
+          cargo test --release --locked -p maho-rpc --test integration authenticated_client_sends_secret_before_correlated_protocol_request
+          cargo test --release --locked -p maho-cli --test integration windows_host_session_list_authenticates_and_returns_session_rows
 
   publish:
     needs: build

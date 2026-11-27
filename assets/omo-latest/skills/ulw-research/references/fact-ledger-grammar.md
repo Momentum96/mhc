@@ -1,5 +1,3 @@
-Read this when validating ledger row schemas, kind rules, transition errors, or grammar rules.
-
 # Fact ledger grammar
 
 `fact-ledger.json` is the single source of numbers and quotes for a research run. This file is

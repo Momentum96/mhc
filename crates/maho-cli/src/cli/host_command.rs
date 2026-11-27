@@ -206,10 +206,7 @@ pub fn parse_host_args(args: &[String]) -> Result<ParsedHostArgs, String> {
         return Err("Error: --expected-generation is for a hard stop, not --drain.".to_owned());
     }
     if let Some(text) = wait_ms {
-        let parsed = (!text.is_empty() && text.chars().all(|c| c.is_ascii_digit()))
-            .then(|| text.parse::<u64>().ok())
-            .flatten()
-            .filter(|value| (1..=9_007_199_254_740_991).contains(value));
+        let parsed = parse_wait_ms(text);
         result.wait_ms = Some(parsed.ok_or_else(|| format!("Error: \"{app} host stop --wait-ms\" needs a positive whole number of milliseconds."))?);
     }
     if !handover.is_empty() {
@@ -218,10 +215,34 @@ pub fn parse_host_args(args: &[String]) -> Result<ParsedHostArgs, String> {
     Ok(result)
 }
 
+fn parse_wait_ms(text: &str) -> Option<u64> {
+    let text = text.trim_matches(|c: char| c.is_whitespace() || c == '\u{feff}');
+    for (prefix, base) in [("0x", 16), ("0o", 8), ("0b", 2)] {
+        if text
+            .get(..2)
+            .is_some_and(|value| value.eq_ignore_ascii_case(prefix))
+        {
+            let digits = text.get(2..)?;
+            if digits.starts_with('+') {
+                return None;
+            }
+            return u64::from_str_radix(digits, base)
+                .ok()
+                .filter(|value| (1..=9_007_199_254_740_991).contains(value));
+        }
+    }
+    let value = text.parse::<f64>().ok()?;
+    if value.fract() != 0.0 || !(1.0..=9_007_199_254_740_991.0).contains(&value) {
+        return None;
+    }
+    // The safe integer check above proves this conversion is exact.
+    Some(value as u64)
+}
+
 const USAGE: &str = "usage: {app} host <ensure|status|stop|handoff|shard-path|gc> [options]
 
   ensure   [--launch-spec <file>] [--policy upgrade|fallback|never] [--socket <path>]
-  status   [--include-workers] [--all] [--socket <path>]
+  status   [--include-workers] [--all] [--socket <path>]   (--all: every endpoint, ignores --socket)
   stop     [--drain [--instance <id>] [--wait-ms <n>]] [--force] [--expected-generation <json>] [--socket <path>]
   handoff  [--launch-spec <file>] [--socket <path>] [--allow-downgrade]
            (a host on a newer engine is refused older_engine unless --allow-downgrade)

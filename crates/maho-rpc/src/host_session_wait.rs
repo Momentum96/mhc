@@ -2,6 +2,7 @@
 //! never on elapsed time, and report a lost transport instead of waiting for the deadline.
 use crate::host_runner::{HOST_EXIT_ERROR, HOST_EXIT_OK, HostOutcome};
 use crate::rpc_client::{RpcClient, RpcClientError};
+use futures::{StreamExt, stream::FuturesUnordered};
 use serde_json::{Value, json};
 use std::time::{Duration, Instant};
 
@@ -117,8 +118,10 @@ async fn wait_events(
     finish: &impl Fn(&str, Option<&Value>) -> HostOutcome,
 ) -> Result<HostOutcome, RpcClientError> {
     let mut observed = false;
-    let mut snapshot = std::pin::pin!(client.get_state());
-    let mut snapshot_pending = true;
+    let mut state = None;
+    let mut snapshots = FuturesUnordered::new();
+    let snapshot = |initial| async move { (initial, client.get_state().await) };
+    snapshots.push(snapshot(true));
     let lost = transport_lost(client);
     let mut lost = std::pin::pin!(lost);
     loop {
@@ -134,30 +137,31 @@ async fn wait_events(
                 };
                 match classify(&event, request.until) {
                     None => {}
-                    Some(Signal::Terminal(kind)) => return Ok(finish(kind, None)),
+                    Some(Signal::Terminal(kind)) => return Ok(finish(kind, state.as_ref())),
                     Some(Signal::Settled) => {
                         observed = true;
-                        let state = client.get_state().await?;
-                        if request.until == WaitUntil::Done {
-                            return Ok(finish("done", Some(&state)));
-                        }
-                        if is_drained(&state) {
-                            return Ok(finish("idle", Some(&state)));
-                        }
+                        // Do not block terminal events or transport loss on this RPC reply.
+                        snapshots.push(snapshot(false));
                     }
                 }
             }
-            state = &mut snapshot, if snapshot_pending => {
-                snapshot_pending = false;
-                let state = state?;
-                // A parked steer keeps `idle` waiting: it only drains with the next prompt.
-                let settled = match request.until {
-                    WaitUntil::Done => state["isStreaming"] != true,
-                    WaitUntil::Idle => is_drained(&state),
+            Some((initial, reply)) = snapshots.next(), if !snapshots.is_empty() => {
+                let reply = reply?;
+                let outcome = if initial {
+                    // A parked steer keeps `idle` waiting: it only drains with the next prompt.
+                    let settled = match request.until {
+                        WaitUntil::Done => reply["isStreaming"] != true,
+                        WaitUntil::Idle => is_drained(&reply),
+                    };
+                    (!observed && settled).then_some("already_idle")
+                } else {
+                    (request.until == WaitUntil::Done || is_drained(&reply))
+                        .then_some(request.until.as_str())
                 };
-                if !observed && settled {
-                    return Ok(finish("already_idle", Some(&state)));
+                if let Some(outcome) = outcome {
+                    return Ok(finish(outcome, Some(&reply)));
                 }
+                state = Some(reply);
             }
             error = &mut lost => return Err(error),
         }
@@ -302,6 +306,35 @@ mod tests {
             assert_eq!(outcome.payload["outcome"], expected);
             client.stop().await;
         }
+    }
+
+    #[tokio::test]
+    async fn parking_finishes_a_wait_even_with_a_settlement_read_in_flight() {
+        let (client, host) = wire_rig(|call, reply| {
+            if call == 1 {
+                vec![
+                    with_data(reply, json!({"isStreaming":true})),
+                    json!({"type":"agent_idle"}),
+                ]
+            } else {
+                // No response to this read: the session parked while the request was in flight.
+                vec![json!({"type":"session_parked"})]
+            }
+        });
+        let outcome = wait_for_host_session(
+            &client,
+            Some("rpc-1"),
+            HostSessionWait {
+                until: WaitUntil::Idle,
+                ..DONE
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome.exit_code, HOST_EXIT_OK);
+        assert_eq!(outcome.payload["outcome"], "session_parked");
+        client.stop().await;
+        assert_eq!(host.await.unwrap(), 2);
     }
 
     #[tokio::test]

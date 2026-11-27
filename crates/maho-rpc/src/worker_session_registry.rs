@@ -636,6 +636,7 @@ impl WorkerSessionRegistry {
         Ok(())
     }
     pub fn list_sessions(&self, include_workers: bool) -> Vec<serde_json::Value> {
+        let now = crate::connection_handler::now_ms();
         lock(&self.state).entries.iter().filter(|(_,entry)|include_workers||entry.identity.kind!=maho_ext_api::SessionKind::Worker).map(|(handle,entry)|{
             let snapshot=entry.worker.snapshot();let state=snapshot.as_ref().map(|snapshot|&snapshot.state);
             let status=match entry.close.state{RpcSessionState::Opening=>"opening",RpcSessionState::Open=>"open",RpcSessionState::Closing|RpcSessionState::Quarantined=>"closing",RpcSessionState::Closed=>"closed"};
@@ -644,6 +645,7 @@ impl WorkerSessionRegistry {
                 "sessionId":handle,
                 "cwd":state.and_then(|state|state["cwd"].as_str()).unwrap_or(entry.cwd.as_str()),
                 "status":status,
+                "idleMs": (now - entry.last_command_at).max(0.0),
                 "attachments":entry.close.attachments.max(0),
                 "retain_on_disconnect": entry.close.retain_on_disconnect,
                 "kind":if entry.identity.kind==maho_ext_api::SessionKind::Worker{"worker"}else{"interactive"},

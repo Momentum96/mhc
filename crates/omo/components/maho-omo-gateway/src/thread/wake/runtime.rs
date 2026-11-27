@@ -11,6 +11,7 @@ use super::super::same_device_wake::{CarrierWakeFn, SameDeviceWake};
 use super::super::store::{GatewayStoreOptions, create_gateway_store};
 use super::super::store_api::GatewayStoreApi;
 use super::carrier::{Carrier, CarrierEvaluation, CarrierOptions, CarrierWakeOutcome};
+#[cfg(unix)]
 use super::carrier_connection::{CarrierHostConnection, UnixCarrierHostConnection};
 use super::consumer_start::{ConsumerStartInput, ServingConsumer, start_delivery_consumer};
 use super::engine_minimum::{MIN_WAKE_ENGINE_VERSION, engine_drops_retained_record};
@@ -196,12 +197,13 @@ pub fn start_thread_wake_at_session(
         opts.idle_exit_ms = options.idle_exit_ms;
         engine_host_ensure(opts)
     });
-    let key_root = options.key_root.clone();
     let connect = options.connect.clone().unwrap_or_else(|| {
         let sock = socket.clone();
-        let kr = key_root.clone();
+        #[cfg(unix)]
+        let kr = options.key_root.clone();
         Arc::new(move || {
             let sock = sock.clone();
+            #[cfg(unix)]
             let kr = kr.clone();
             Box::pin(async move {
                 #[cfg(unix)]

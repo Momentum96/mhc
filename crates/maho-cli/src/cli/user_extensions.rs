@@ -93,6 +93,11 @@ enum NativeResolution {
     Unresolved,
 }
 
+/// A launch spec is explicit: don't start a host claiming an extension it cannot load.
+pub(super) fn is_native_extension_path(path: &str) -> bool {
+    !matches!(native_resolution(path), NativeResolution::Unresolved)
+}
+
 /// Map one resolved extension path to the linked port that replaces its TypeScript entry: the file
 /// (or `<id>/index.*` directory) name, then the nearest package name. Generated global-default shims
 /// are already provided natively. senpi shadows only `VENDORED_BUILTIN_EXTENSION_PACKAGES`

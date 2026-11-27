@@ -151,7 +151,7 @@ const MIT_LSP_DAEMON_NAME = `mhc-lsp${EXE_SUFFIX}`;
 const BROWSER_SKILL_NAME = "browser";
 const BROWSER_RUNTIME_REL_DIR = "runtime/omowright";
 const BROWSER_RUNTIME_MANIFEST = "manifest.json";
-const BROWSER_RUNTIME_FILES = ["index.js", "page-bundle.js", BROWSER_RUNTIME_MANIFEST];
+const BROWSER_RUNTIME_FILES = ["index.js", "page-bundle.js", "LICENSE", BROWSER_RUNTIME_MANIFEST];
 const BROWSER_RUNTIME_TARGET_DIR = `${SKILLS_DIR}/${BROWSER_SKILL_NAME}/${BROWSER_RUNTIME_REL_DIR}`;
 
 // The repository-owned latest asset overlay, relative to the repository root. It is read only by
@@ -1707,6 +1707,7 @@ async function selfTest() {
 		const writeRuntime = async (extra = {}) => {
 			await writeFile(join(runtimeDir, "index.js"), "export const connectBrowserSkill = () => 'fixture-session';\n");
 			await writeFile(join(runtimeDir, "page-bundle.js"), "(function(){ globalThis.__omowright = { fixture: true } })();\n");
+			await writeFile(join(runtimeDir, "LICENSE"), "fixture license\n");
 			await writeFile(
 				join(runtimeDir, BROWSER_RUNTIME_MANIFEST),
 				`${JSON.stringify({ name: "omowright", version: "0.0.0-fixture", commit: omowrightCommit, sourceDigest: "a".repeat(64), files: { "index.js": "b".repeat(64), "page-bundle.js": "c".repeat(64) }, ...extra }, null, 2)}\n`,

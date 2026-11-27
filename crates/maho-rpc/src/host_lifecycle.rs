@@ -139,6 +139,13 @@ pub async fn wait_for_idle_exit(
         }
     }
 }
+
+async fn wait_for_policy_idle_exit(
+    policy: &HostLifecyclePolicy,
+    activity: tokio::sync::watch::Receiver<HostActivity>,
+) -> Result<(), tokio::sync::watch::error::RecvError> {
+    wait_for_idle_exit(policy.effective_idle_exit_ms(), activity).await
+}
 #[cfg(unix)]
 pub async fn proxy_connection(
     mut client: tokio::net::UnixStream,
@@ -146,21 +153,6 @@ pub async fn proxy_connection(
     internal_secret: Option<&[u8]>,
 ) -> std::io::Result<()> {
     let mut internal = tokio::net::UnixStream::connect(internal_socket).await?;
-    if let Some(secret) = internal_secret {
-        crate::socket_transport::send_socket_handshake(&mut internal, secret).await?;
-    }
-    tokio::io::copy_bidirectional(&mut client, &mut internal).await?;
-    Ok(())
-}
-/// One authenticated public client proxied to the internal named pipe behind the internal secret.
-#[cfg(windows)]
-pub async fn proxy_connection(
-    mut client: tokio::net::windows::named_pipe::NamedPipeServer,
-    internal_address: &str,
-    internal_secret: Option<&[u8]>,
-) -> std::io::Result<()> {
-    let mut internal =
-        win32_pipe::connect(internal_address, std::time::Duration::from_secs(5)).await?;
     if let Some(secret) = internal_secret {
         crate::socket_transport::send_socket_handshake(&mut internal, secret).await?;
     }
@@ -176,28 +168,6 @@ pub async fn proxy_connection(
     Err(std::io::Error::other(
         "rpc host sockets are not supported on this platform yet",
     ))
-}
-/// `run_socket_proxy` for win32: the public and internal endpoints are named-pipe addresses.
-#[cfg(windows)]
-pub async fn run_socket_proxy(
-    listener: tokio::net::windows::named_pipe::NamedPipeServer,
-    public_address: String,
-    internal_address: String,
-    public_secret: Option<Vec<u8>>,
-    internal_secret: Option<Vec<u8>>,
-    draining: tokio::sync::watch::Receiver<bool>,
-    connections: tokio::sync::watch::Sender<usize>,
-) -> std::io::Result<()> {
-    win32_pipe::run_pipe_proxy(
-        listener,
-        public_address,
-        internal_address,
-        public_secret,
-        internal_secret,
-        draining,
-        connections,
-    )
-    .await
 }
 #[cfg(not(any(unix, windows)))]
 pub async fn run_socket_proxy(
@@ -520,7 +490,6 @@ pub async fn run_host_supervisor(launch: SupervisorLaunch) -> std::io::Result<()
     let bound = std::sync::Arc::new(std::sync::Mutex::new(None));
     // senpi `createPublicProxy` admission authority: created before the teardown so every shutdown path stops it
     // first and flushes its pending refusals before the internal directory is removed.
-    #[cfg(unix)]
     let admission = std::sync::Arc::new(crate::host_admission::HostAdmission::new(
         serde_json::json!({"protocolVersion":1,"serverVersion":maho_core::engine_build_identity::engine_build_identity().text,"capabilities":[],"instanceId":instance_id})
             .as_object()
@@ -541,7 +510,6 @@ pub async fn run_host_supervisor(launch: SupervisorLaunch) -> std::io::Result<()
         _hard_exit: None,
         #[cfg(unix)]
         public_endpoint: public_endpoint.clone(),
-        #[cfg(unix)]
         admission: admission.clone(),
     };
     // Drain (senpi `drainForHandoff`/`registerSupervisorSignals`): SIGUSR1 asks the child to park
@@ -645,9 +613,11 @@ pub async fn run_host_supervisor(launch: SupervisorLaunch) -> std::io::Result<()
             crate::host_daemon_registration::write_host_registration(
                 &paths,
                 &crate::host_daemon_registration::HostRegistration {
-                    pid: child_pid,
+                    // The public listener belongs to this supervisor, which can stop and
+                    // reap the child even when the child's RPC executor is stalled.
+                    pid: std::process::id(),
                     process_start_time: crate::host_reservations::read_process_start_time(
-                        child_pid,
+                        std::process::id(),
                     ),
                     socket: public_socket,
                     instance_id,
@@ -771,13 +741,7 @@ pub async fn run_host_supervisor(launch: SupervisorLaunch) -> std::io::Result<()
     // idle decision does. The public proxy does not classify clients, so every live client is attached here: owner
     // quiescence still needs zero clients.
     let activity = std::sync::Arc::new(std::sync::Mutex::new(
-        crate::host_lifecycle_activity::SupervisorActivity::new(
-            if policy.cold_start == "persistent" {
-                f64::INFINITY
-            } else {
-                policy.idle_exit_ms
-            },
-        ),
+        crate::host_lifecycle_activity::SupervisorActivity::new(policy.effective_idle_exit_ms()),
     ));
     // senpi `SupervisorOwner`: an ensured generation (or a launch carrying `--owner-fd`) binds its lifetime owner;
     // a direct launch without an owner record has none. The owner leaving a quiescent host ends this generation.
@@ -926,17 +890,20 @@ pub async fn run_host_supervisor(launch: SupervisorLaunch) -> std::io::Result<()
         connections_tx,
     );
     #[cfg(windows)]
-    let proxy = run_socket_proxy(
+    let proxy = win32_pipe::run_pipe_proxy(
         listener,
         public_address,
-        internal.socket.clone(),
-        public_secret.clone(),
-        internal_secret.clone(),
+        win32_pipe::PipeProxyOptions {
+            internal_address: internal.socket.clone(),
+            public_secret: public_secret.clone(),
+            internal_secret: internal_secret.clone(),
+            admission: admission.clone(),
+        },
         draining_rx.clone(),
         connections_tx,
     );
     tokio::pin!(proxy);
-    let idle = wait_for_idle_exit(policy.idle_exit_ms, activity_rx);
+    let idle = wait_for_policy_idle_exit(&policy, activity_rx);
     tokio::pin!(idle);
     let mut draining = false;
     let mut signal_code: Option<i32> = None;
@@ -951,12 +918,8 @@ pub async fn run_host_supervisor(launch: SupervisorLaunch) -> std::io::Result<()
         child_running.clone(),
         || false,
         {
-            #[cfg(unix)]
             let admission = admission.clone();
-            move || {
-                #[cfg(unix)]
-                admission.stop();
-            }
+            move || admission.stop()
         },
         Some(drain_relay),
         std::env::consts::OS == "windows",
@@ -1065,7 +1028,6 @@ struct GenerationTeardown {
     #[cfg(unix)]
     public_endpoint: Option<std::sync::Arc<crate::rpc_public_key::RpcPublicEndpoint>>,
     /// The public proxy's admission authority: stopped first on every shutdown, flushed before cleanup.
-    #[cfg(unix)]
     admission: std::sync::Arc<crate::host_admission::HostAdmission>,
 }
 #[cfg(windows)]
@@ -1083,7 +1045,6 @@ impl GenerationTeardown {
 impl crate::host_lifecycle_shutdown::SupervisorTeardown for GenerationTeardown {
     fn stop_admission(&mut self) {
         // senpi `performShutdown`: pending opens are refused host_stopping from this instant.
-        #[cfg(unix)]
         self.admission.stop();
         self.draining_tx.send_replace(true);
     }
@@ -1141,7 +1102,6 @@ impl crate::host_lifecycle_shutdown::SupervisorTeardown for GenerationTeardown {
         // supervisor never stays resident. Inert off win32.
         self._hard_exit = Some(ShutdownHardExit::arm(self.platform, exit_code));
         // The refusals already queued are flushed within their bound before the internal directory goes.
-        #[cfg(unix)]
         self.admission.flush().await;
         if let Some(dir) = self.internal_dir.take() {
             let _ = std::fs::remove_dir_all(dir);
@@ -1224,6 +1184,16 @@ fn signal_name(signal: i32) -> String {
 pub struct HostLifecyclePolicy {
     pub cold_start: String,
     pub idle_exit_ms: f64,
+}
+impl HostLifecyclePolicy {
+    /// senpi `SupervisorActivity`: persistence overrides the configured idle window, not the owner ticker.
+    fn effective_idle_exit_ms(&self) -> f64 {
+        if self.cold_start == "persistent" {
+            f64::INFINITY
+        } else {
+            self.idle_exit_ms
+        }
+    }
 }
 pub const INTERNAL_HOST_DIR_PREFIX: &str = "senpi-rpc-host-internal-";
 const SHORT_TEMP_ROOT: &str = "/tmp";
@@ -1578,6 +1548,8 @@ impl Drop for ShutdownHardExit {
 /// a wrong secret ends the connection before a single JSONL byte is read or answered.
 #[cfg(windows)]
 pub mod win32_pipe {
+    use crate::host_admission::HostAdmission;
+    use std::sync::Arc;
     use tokio::net::windows::named_pipe::{ClientOptions, NamedPipeServer, ServerOptions};
     /// `ERROR_PIPE_BUSY`: every instance of the pipe is momentarily in use; the client waits and retries.
     const ERROR_PIPE_BUSY: i32 = 231;
@@ -1614,25 +1586,40 @@ pub mod win32_pipe {
     }
     /// One accepted public client: authenticated with the public secret, then proxied to the internal pipe behind
     /// the internal secret.
+    #[derive(Clone)]
+    pub(crate) struct PipeProxyOptions {
+        pub internal_address: String,
+        pub public_secret: Option<Vec<u8>>,
+        pub internal_secret: Option<Vec<u8>>,
+        pub admission: Arc<HostAdmission>,
+    }
+
     async fn proxy_client(
         mut client: NamedPipeServer,
-        internal_address: String,
-        public_secret: Option<Vec<u8>>,
-        internal_secret: Option<Vec<u8>>,
+        options: PipeProxyOptions,
     ) -> std::io::Result<()> {
-        if let Some(secret) = public_secret {
-            crate::socket_transport::authenticate_socket(&mut client, &secret).await?;
+        if let Some(secret) = &options.public_secret {
+            crate::socket_transport::authenticate_socket(&mut client, secret).await?;
         }
-        super::proxy_connection(client, &internal_address, internal_secret.as_deref()).await
+        let internal = if options.admission.stopping() {
+            None
+        } else {
+            let mut pipe =
+                connect(&options.internal_address, std::time::Duration::from_secs(5)).await?;
+            if let Some(secret) = &options.internal_secret {
+                crate::socket_transport::send_socket_handshake(&mut pipe, secret).await?;
+            }
+            Some(pipe)
+        };
+        crate::host_admission_proxy::proxy_named_pipe(client, internal, options.admission).await;
+        Ok(())
     }
     /// `run_socket_proxy` over a named pipe: serves `public_address` until `draining` turns true, keeps every
     /// attached connection alive through the drain, and returns once they have all ended.
-    pub async fn run_pipe_proxy(
+    pub(crate) async fn run_pipe_proxy(
         mut listener: NamedPipeServer,
         public_address: String,
-        internal_address: String,
-        public_secret: Option<Vec<u8>>,
-        internal_secret: Option<Vec<u8>>,
+        options: PipeProxyOptions,
         mut draining: tokio::sync::watch::Receiver<bool>,
         connections: tokio::sync::watch::Sender<usize>,
     ) -> std::io::Result<()> {
@@ -1652,12 +1639,7 @@ pub mod win32_pipe {
                     connected?;
                     let accepted = std::mem::replace(&mut listener, next_instance(&public_address)?);
                     if *draining.borrow() { break; }
-                    clients.spawn(proxy_client(
-                        accepted,
-                        internal_address.clone(),
-                        public_secret.clone(),
-                        internal_secret.clone(),
-                    ));
+                    clients.spawn(proxy_client(accepted, options.clone()));
                     connections.send_replace(clients.len());
                 },
             }
@@ -1671,7 +1653,7 @@ pub mod win32_pipe {
     #[cfg(test)]
     mod tests {
         use super::*;
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
         fn pipe_address(tag: &str) -> String {
             crate::socket_transport::resolve_socket_transport_address(
                 &format!("C:\\maho-test\\{tag}-{}.sock", std::process::id()),
@@ -1681,19 +1663,23 @@ pub mod win32_pipe {
             .unwrap_or_default()
         }
         #[tokio::test]
-        async fn a_wrong_secret_is_refused_before_any_jsonl_byte_and_the_right_one_is_proxied() {
+        async fn windows_pipe_advertises_ready_and_stopping_only_after_authentication() {
             let public = pipe_address("public");
             let internal = pipe_address("internal");
             let backend = create_first_instance(&internal).unwrap();
             let listener = create_first_instance(&public).unwrap();
             let (drain, draining) = tokio::sync::watch::channel(false);
             let (count, _counts) = tokio::sync::watch::channel(0usize);
+            let admission = Arc::new(HostAdmission::new(serde_json::Map::new()));
             let proxy = tokio::spawn(run_pipe_proxy(
                 listener,
                 public.clone(),
-                internal.clone(),
-                Some(vec![1; 32]),
-                Some(vec![2; 32]),
+                PipeProxyOptions {
+                    internal_address: internal,
+                    public_secret: Some(vec![1; 32]),
+                    internal_secret: Some(vec![2; 32]),
+                    admission: admission.clone(),
+                },
                 draining,
                 count,
             ));
@@ -1722,10 +1708,32 @@ pub mod win32_pipe {
                 crate::socket_transport::authenticate_socket(&mut host, &[2; 32])
                     .await
                     .unwrap();
-                client.write_all(b"request\n").await.unwrap();
-                let mut request = [0u8; 8];
-                host.read_exact(&mut request).await.unwrap();
-                assert_eq!(&request, b"request\n");
+                let mut client = BufReader::new(client);
+                let mut host = BufReader::new(host);
+                let probe = b"{\"id\":\"ensure-host-probe\",\"type\":\"get_protocol_info\"}\n";
+                client.get_mut().write_all(probe).await.unwrap();
+                let mut line = String::new();
+                host.read_line(&mut line).await.unwrap();
+                assert_eq!(line.as_bytes(), probe);
+                host.get_mut()
+                    .write_all(b"{\"id\":\"ensure-host-probe\",\"type\":\"response\",\"command\":\"get_protocol_info\",\"success\":true,\"data\":{\"serverVersion\":\"fixture\",\"capabilities\":[\"detach_connection\"]}}\n")
+                    .await
+                    .unwrap();
+                line.clear();
+                client.read_line(&mut line).await.unwrap();
+                let ready = crate::host_probe::read_answer(&line).unwrap();
+                assert_eq!(ready["lifecycle"], "ready");
+                assert_eq!(
+                    ready["capabilities"],
+                    serde_json::json!(["detach_connection"])
+                );
+                admission.stop();
+                client.get_mut().write_all(probe).await.unwrap();
+                line.clear();
+                client.read_line(&mut line).await.unwrap();
+                let stopping = crate::host_probe::read_answer(&line).unwrap();
+                assert_eq!(stopping["lifecycle"], "stopping");
+                assert_eq!(stopping["serverVersion"], "fixture");
                 drop(client);
                 drop(host);
                 drain.send(true).unwrap();
@@ -1766,6 +1774,29 @@ mod tests {
         assert_eq!(decider.update(0, 1, 99.), IdleExitDecision::Active);
         assert_eq!(decider.update(0, 0, 100.), IdleExitDecision::Idle);
         assert_eq!(decider.update(0, 0, 200.), IdleExitDecision::Exit);
+    }
+    #[tokio::test(start_paused = true)]
+    async fn persistent_policy_cannot_idle_exit_after_last_client_detaches() {
+        use std::time::Duration;
+        for (cold_start, should_exit) in [("persistent", false), ("transient", true)] {
+            let policy = resolve_host_policy(
+                &serde_json::json!({"coldStart":cold_start,"idleExitMs":900000}),
+                &HashMap::new(),
+            );
+            let (publisher, activity) = tokio::sync::watch::channel(HostActivity {
+                connections: 1,
+                active_turns: 0,
+            });
+            let mut idle = std::pin::pin!(wait_for_policy_idle_exit(&policy, activity));
+            assert!(futures::poll!(&mut idle).is_pending());
+            publisher.send_replace(HostActivity::default());
+            assert!(futures::poll!(&mut idle).is_pending());
+            let elapsed = tokio::time::timeout(Duration::from_secs(1_801), idle).await;
+            assert!(
+                matches!((should_exit, elapsed), (true, Ok(Ok(()))) | (false, Err(_))),
+                "{cold_start} supervisor took the wrong exit path"
+            );
+        }
     }
     #[test]
     fn policy_precedence_and_invalid_fallback() {

@@ -36,6 +36,7 @@ pub struct HostProtocolInfo {
     pub engine_version: Option<String>,
     pub engine_ordinal: Option<[f64; 5]>,
     pub launch_profile: Option<RpcLaunchProfile>,
+    pub runtime_build_id: Option<String>,
     pub memory_pressure: Option<bool>,
     pub path_identity_resolver: Option<PathIdentityResolverStatus>,
     /// The agent directory the host reads and writes; absent on older hosts. Only a client of the same dir may
@@ -119,6 +120,10 @@ pub fn parse_host_protocol_info(data: &Value) -> Option<HostProtocolInfo> {
             .map(str::to_owned),
         engine_ordinal,
         launch_profile,
+        runtime_build_id: object
+            .get("runtimeBuildId")
+            .and_then(crate::runtime_build_id::parse_runtime_build_id)
+            .map(str::to_owned),
         memory_pressure: object.get("memory_pressure").and_then(Value::as_bool),
         path_identity_resolver: object
             .get("path_identity_resolver")

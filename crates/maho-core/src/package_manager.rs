@@ -2784,7 +2784,7 @@ impl DefaultPackageManager<'_> {
                 }
             }
         }
-        self.add_auto_resources(&mut paths)?;
+        paths = self.add_auto_resources(paths).await?;
         let global_entries = strings(self.settings_manager.get_global().get("extensions"));
         let global_overrides: Vec<_> = global_entries
             .into_iter()
@@ -2821,76 +2821,88 @@ impl DefaultPackageManager<'_> {
         Ok(finalize_paths(paths))
     }
 
-    fn add_auto_resources(&self, paths: &mut ResolvedPaths) -> PackageResult<()> {
+    async fn add_auto_resources(&self, paths: ResolvedPaths) -> PackageResult<ResolvedPaths> {
         let trusted = self.settings_manager.is_project_trusted();
         let project_base = join_path(&self.cwd, &crate::config::config_dir_name());
         let legacy = join_path(&self.cwd, ".pi");
         let user_agents = join_path(&self.home_dir, ".agents/skills");
-        let mut locations = Vec::new();
-        if trusted {
-            locations.push((project_base.clone(), SourceScope::Project, None));
-            for path in collect_ancestor_agents_skill_dirs(&self.cwd)
-                .into_iter()
-                .filter(|path| path != &user_agents)
-            {
-                locations.push((
-                    parent_path(&path),
-                    SourceScope::Project,
-                    Some(SkillDiscoveryMode::Agents),
-                ));
-            }
-        }
-        // The pinned legacy .pi discovery is independent of the current config-dir trust gate.
-        if legacy != project_base {
-            locations.push((legacy, SourceScope::Project, None));
-        }
-        locations.push((self.agent_dir.clone(), SourceScope::User, None));
-        locations.push((
-            parent_path(&user_agents),
-            SourceScope::User,
-            Some(SkillDiscoveryMode::Agents),
-        ));
-        for (base, scope, agents) in locations {
-            let settings = if scope == SourceScope::Project {
-                self.settings_manager.get_project()
-            } else {
-                self.settings_manager.get_global()
-            };
-            let metadata = PathMetadata {
-                skill_provenance: None,
-                source: "auto".into(),
-                scope,
-                origin: SourceOrigin::TopLevel,
-                base_dir: Some(base.clone()),
-            };
-            for kind in RESOURCE_TYPES {
-                if agents.is_some() && kind != ResourceType::Skills {
-                    continue;
-                }
-                let overrides: Vec<_> = strings(settings.get(kind.as_str()))
+        let agent_dir = self.agent_dir.clone();
+        let project_settings = self.settings_manager.get_project().clone();
+        let global_settings = self.settings_manager.get_global().clone();
+        let cwd = self.cwd.clone();
+        // An implicit skill directory (including a symlink target) can stall in readdir/open.
+        // Keep that filesystem wait off the shared host's RPC executor.
+        tokio::task::spawn_blocking(move || {
+            let mut locations = Vec::new();
+            if trusted {
+                locations.push((project_base.clone(), SourceScope::Project, None));
+                for path in collect_ancestor_agents_skill_dirs(&cwd)
                     .into_iter()
-                    .filter(|entry| is_override_pattern(entry))
-                    .collect();
-                for path in auto_files(
-                    &join_path(&base, kind.as_str()),
-                    kind,
-                    agents.unwrap_or(SkillDiscoveryMode::Pi),
-                ) {
-                    let enabled = enabled_by_patterns(&path, &overrides, &base);
-                    let mut selected = metadata.clone();
-                    if kind == ResourceType::Skills {
-                        selected.skill_provenance = Some(crate::skill_access::select_skill_root(
-                            &join_path(&base, kind.as_str()),
-                            scope,
-                            &self.cwd,
-                            false,
-                        ));
-                    }
-                    add_resource(target_resources(paths, kind), path, enabled, &selected);
+                    .filter(|path| path != &user_agents)
+                {
+                    locations.push((
+                        parent_path(&path),
+                        SourceScope::Project,
+                        Some(SkillDiscoveryMode::Agents),
+                    ));
                 }
             }
-        }
-        Ok(())
+            // The pinned legacy .pi discovery is independent of the current config-dir trust gate.
+            if legacy != project_base {
+                locations.push((legacy, SourceScope::Project, None));
+            }
+            locations.push((agent_dir, SourceScope::User, None));
+            locations.push((
+                parent_path(&user_agents),
+                SourceScope::User,
+                Some(SkillDiscoveryMode::Agents),
+            ));
+            let mut paths = paths;
+            for (base, scope, agents) in locations {
+                let settings = if scope == SourceScope::Project {
+                    &project_settings
+                } else {
+                    &global_settings
+                };
+                let metadata = PathMetadata {
+                    skill_provenance: None,
+                    source: "auto".into(),
+                    scope,
+                    origin: SourceOrigin::TopLevel,
+                    base_dir: Some(base.clone()),
+                };
+                for kind in RESOURCE_TYPES {
+                    if agents.is_some() && kind != ResourceType::Skills {
+                        continue;
+                    }
+                    let overrides: Vec<_> = strings(settings.get(kind.as_str()))
+                        .into_iter()
+                        .filter(|entry| is_override_pattern(entry))
+                        .collect();
+                    for path in auto_files(
+                        &join_path(&base, kind.as_str()),
+                        kind,
+                        agents.unwrap_or(SkillDiscoveryMode::Pi),
+                    ) {
+                        let enabled = enabled_by_patterns(&path, &overrides, &base);
+                        let mut selected = metadata.clone();
+                        if kind == ResourceType::Skills {
+                            selected.skill_provenance =
+                                Some(crate::skill_access::select_skill_root(
+                                    &join_path(&base, kind.as_str()),
+                                    scope,
+                                    &cwd,
+                                    false,
+                                ));
+                        }
+                        add_resource(target_resources(&mut paths, kind), path, enabled, &selected);
+                    }
+                }
+            }
+            paths
+        })
+        .await
+        .map_err(|error| std::io::Error::other(error).into())
     }
 }
 
@@ -3373,6 +3385,63 @@ mod discovery_tests {
 mod tests {
     use super::*;
     use crate::source_info::SourceOrigin;
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn stalled_skill_discovery_does_not_block_other_executor_work() {
+        use std::io::Write as _;
+        let temp = tempfile::tempdir().expect("temporary agent directory");
+        let skills = temp.path().join("skills");
+        std::fs::create_dir(&skills).expect("skills directory");
+        let ignore = skills.join(".gitignore");
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(&ignore)
+                .status()
+                .expect("mkfifo")
+                .success()
+        );
+        std::fs::write(skills.join("ignored.md"), "test").expect("skill");
+        let (ready, signal) = std::sync::mpsc::channel();
+        let (finished, completion) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            // The bound is also a circuit breaker for the original synchronous walk.
+            let executor_progressed = signal
+                .recv_timeout(std::time::Duration::from_secs(3))
+                .is_ok();
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .open(ignore)
+                .expect("open test FIFO");
+            file.write_all(b"ignored.md\n").expect("write ignore rule");
+            drop(file);
+            finished
+                .send(executor_progressed)
+                .expect("report FIFO result");
+        });
+        let mut settings = SettingsManager::in_memory(Settings::default(), false);
+        let dir = temp.path().to_string_lossy();
+        let manager = DefaultPackageManager::new(PackageManagerOptions {
+            cwd: &dir,
+            agent_dir: &dir,
+            settings_manager: &mut settings,
+        });
+        let (result, ()) = tokio::join!(biased; manager.resolve(None), async {
+            ready.send(()).expect("report executor progress");
+        });
+        let paths = result.expect("resolve resources");
+        assert!(
+            completion
+                .recv_timeout(std::time::Duration::from_secs(3))
+                .expect("FIFO writer")
+        );
+        assert!(
+            !paths
+                .skills
+                .iter()
+                .any(|skill| skill.path.ends_with("/ignored.md"))
+        );
+    }
 
     fn metadata(source: &str, scope: SourceScope, origin: SourceOrigin) -> PathMetadata {
         PathMetadata {

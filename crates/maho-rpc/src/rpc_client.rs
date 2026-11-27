@@ -2,28 +2,70 @@ use serde_json::Value;
 use std::collections::{BTreeSet, VecDeque};
 pub const MAX_PENDING_SESSION_EVENTS: usize = 512;
 pub const MAX_PENDING_SESSION_EVENT_BYTES: usize = 1024 * 1024;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 pub struct RpcSocketClient {
-    stream: tokio::net::UnixStream,
+    stream: RpcStream,
     pub frames: RpcClientFrames,
     reader: crate::jsonl::JsonlLineReader,
     lines: VecDeque<crate::jsonl::LineRecord>,
 }
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 pub struct RpcSocketClient {
     pub frames: RpcClientFrames,
 }
 #[cfg(unix)]
 pub type RpcStream = tokio::net::UnixStream;
-#[cfg(not(unix))]
+#[cfg(windows)]
+pub type RpcStream = tokio::net::windows::named_pipe::NamedPipeClient;
+#[cfg(not(any(unix, windows)))]
 pub type RpcStream = ();
-#[cfg(unix)]
+#[cfg(windows)]
+async fn connect_windows_pipe(
+    path: &std::path::Path,
+    secret_path: Option<&std::path::Path>,
+) -> std::io::Result<RpcStream> {
+    use crate::socket_transport::{
+        SOCKET_HANDSHAKE_TIMEOUT_MS, read_socket_secret, resolve_socket_transport_address,
+        send_socket_handshake, socket_secret_path,
+    };
+    use std::{io, path::PathBuf, time::Duration};
+
+    let endpoint = path.to_str().ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidInput, "invalid Windows RPC endpoint")
+    })?;
+    let secret_path = match secret_path {
+        Some(path) => std::borrow::Cow::Borrowed(path),
+        None => std::borrow::Cow::Owned(PathBuf::from(
+            socket_secret_path(endpoint)
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?,
+        )),
+    };
+    // Windows uses the same secret-derived address and initial secret bytes as the
+    // Windows status probe and upstream senpi, not the POSIX sealed endpoint protocol.
+    let secret = read_socket_secret(&secret_path)?;
+    let address = resolve_socket_transport_address(endpoint, "win32", Some(&secret))
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+    let timeout = Duration::from_millis(SOCKET_HANDSHAKE_TIMEOUT_MS);
+    let mut stream = crate::host_lifecycle::win32_pipe::connect(&address, timeout).await?;
+    tokio::time::timeout(timeout, send_socket_handshake(&mut stream, &secret))
+        .await
+        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "RPC socket handshake timed out"))??;
+    Ok(stream)
+}
+
+#[cfg(any(unix, windows))]
 impl RpcSocketClient {
+    #[cfg(unix)]
     pub async fn connect(path: &std::path::Path) -> std::io::Result<Self> {
         Ok(Self::from_stream(
             tokio::net::UnixStream::connect(path).await?,
         ))
     }
+    #[cfg(windows)]
+    pub async fn connect(path: &std::path::Path) -> std::io::Result<Self> {
+        Ok(Self::from_stream(connect_windows_pipe(path, None).await?))
+    }
+    #[cfg(unix)]
     pub async fn connect_authenticated(
         path: &std::path::Path,
         secret_path: &std::path::Path,
@@ -33,7 +75,16 @@ impl RpcSocketClient {
         crate::socket_transport::send_socket_handshake(&mut stream, &secret).await?;
         Ok(Self::from_stream(stream))
     }
-    pub fn from_stream(stream: tokio::net::UnixStream) -> Self {
+    #[cfg(windows)]
+    pub async fn connect_authenticated(
+        path: &std::path::Path,
+        secret_path: &std::path::Path,
+    ) -> std::io::Result<Self> {
+        Ok(Self::from_stream(
+            connect_windows_pipe(path, Some(secret_path)).await?,
+        ))
+    }
+    pub fn from_stream(stream: RpcStream) -> Self {
         Self {
             stream,
             frames: RpcClientFrames::for_socket(),
@@ -264,7 +315,7 @@ impl RpcSocketClient {
         Ok(())
     }
 }
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 impl RpcSocketClient {
     pub async fn connect(_path: &std::path::Path) -> std::io::Result<Self> {
         Err(std::io::Error::other(
@@ -559,7 +610,7 @@ pub struct RpcClientOptions {
 /// next `set_client_info`.
 pub struct RpcClient {
     inner: std::sync::Arc<RpcMux>,
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     options: RpcClientOptions,
 }
 
@@ -587,7 +638,9 @@ struct RpcMux {
 
 #[cfg(unix)]
 type RpcWriteHalf = std::os::unix::net::UnixStream;
-#[cfg(not(unix))]
+#[cfg(windows)]
+type RpcWriteHalf = tokio::io::WriteHalf<RpcStream>;
+#[cfg(not(any(unix, windows)))]
 type RpcWriteHalf = ();
 
 impl RpcMux {
@@ -646,14 +699,14 @@ impl Drop for RpcClient {
 }
 
 impl RpcClient {
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     pub fn new(options: RpcClientOptions) -> Self {
         Self {
             inner: std::sync::Arc::new(RpcMux::new()),
             options,
         }
     }
-    #[cfg(not(unix))]
+    #[cfg(not(any(unix, windows)))]
     pub fn new(_options: RpcClientOptions) -> Self {
         Self {
             inner: std::sync::Arc::new(RpcMux::new()),
@@ -668,15 +721,22 @@ impl RpcClient {
             RpcClientOptions::default(),
         ))
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    pub async fn connect(path: &std::path::Path) -> std::io::Result<Self> {
+        Ok(Self::from_stream(
+            connect_windows_pipe(path, None).await?,
+            RpcClientOptions::default(),
+        ))
+    }
+    #[cfg(not(any(unix, windows)))]
     pub async fn connect(_path: &std::path::Path) -> std::io::Result<Self> {
         Err(std::io::Error::other(
             "rpc host sockets are not supported on this platform yet",
         ))
     }
 
-    #[cfg(unix)]
-    pub fn from_stream(stream: tokio::net::UnixStream, options: RpcClientOptions) -> Self {
+    #[cfg(any(unix, windows))]
+    pub fn from_stream(stream: RpcStream, options: RpcClientOptions) -> Self {
         let client = Self::new(options);
         if let Err(error) = client.attach(stream) {
             client.inner.fail_pending(error);
@@ -684,7 +744,7 @@ impl RpcClient {
         }
         client
     }
-    #[cfg(not(unix))]
+    #[cfg(not(any(unix, windows)))]
     pub fn from_stream(_stream: RpcStream, options: RpcClientOptions) -> Self {
         Self::new(options)
     }
@@ -692,14 +752,24 @@ impl RpcClient {
     /// Bring the transport up: connect to `options.socket_path`, or ensure a host serves the
     /// default endpoint for the agent directory.
     pub async fn start(&self) -> RpcClientResult<()> {
-        #[cfg(not(unix))]
+        self.start_with_public_proof(false).await
+    }
+
+    /// `host session` talks to the public endpoint; prove its key before sending session commands.
+    pub(crate) async fn start_public(&self) -> RpcClientResult<()> {
+        self.start_with_public_proof(true).await
+    }
+
+    async fn start_with_public_proof(&self, prove_endpoint: bool) -> RpcClientResult<()> {
+        #[cfg(not(any(unix, windows)))]
         {
+            let _ = prove_endpoint;
             Err(
                 std::io::Error::other("rpc host sockets are not supported on this platform yet")
                     .into(),
             )
         }
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         {
             if self.inner.write.lock().await.is_some() {
                 return Err(std::io::Error::other("Client already started").into());
@@ -725,7 +795,42 @@ impl RpcClient {
                     std::path::PathBuf::from(ensured.socket)
                 }
             };
-            let stream = tokio::net::UnixStream::connect(&path).await?;
+            #[cfg(windows)]
+            let stream = {
+                let _ = prove_endpoint; // Every Windows connection uses its endpoint secret.
+                connect_windows_pipe(&path, None).await?
+            };
+            #[cfg(unix)]
+            let stream = if prove_endpoint {
+                let endpoint = path.to_str().ok_or_else(|| {
+                    std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid RPC endpoint")
+                })?;
+                let mut first = serde_json::json!({"type":"get_protocol_info","observe":true});
+                if let Some(origin) = crate::host_observe_request::process_origin_host_instance() {
+                    first[crate::host_observe_request::ORIGIN_HOST_INSTANCE_FIELD] = origin.into();
+                }
+                let (socket, info) = crate::host_probe::authenticated_host_socket(
+                    endpoint,
+                    &first,
+                    crate::socket_transport::SOCKET_HANDSHAKE_TIMEOUT_MS,
+                    self.options.agent_dir.as_deref(),
+                )
+                .await
+                .map_err(|error| match error.downcast::<std::io::Error>() {
+                    Ok(io) => *io,
+                    Err(error) => std::io::Error::other(error),
+                })?;
+                if info["success"] != true {
+                    return Err(std::io::Error::other(format!(
+                        "RPC authentication probe refused on {endpoint}: {}",
+                        info["error"].as_str().unwrap_or("unknown error")
+                    ))
+                    .into());
+                }
+                socket.into_stream()?
+            } else {
+                tokio::net::UnixStream::connect(&path).await?
+            };
             self.attach(stream)?;
             Ok(())
         }
@@ -784,11 +889,17 @@ impl RpcClient {
             .clone()
     }
 
-    #[cfg(unix)]
-    fn attach(&self, stream: tokio::net::UnixStream) -> std::io::Result<()> {
-        let write = stream.into_std()?;
-        write.set_nonblocking(true)?;
-        let read = tokio::net::UnixStream::from_std(write.try_clone()?)?;
+    #[cfg(any(unix, windows))]
+    fn attach(&self, stream: RpcStream) -> std::io::Result<()> {
+        #[cfg(unix)]
+        let (read, write) = {
+            let write = stream.into_std()?;
+            write.set_nonblocking(true)?;
+            let read = tokio::net::UnixStream::from_std(write.try_clone()?)?;
+            (read, write)
+        };
+        #[cfg(windows)]
+        let (read, write) = tokio::io::split(stream);
         // Install the write half before spawning the reader. `try_lock` is enough: `attach` runs
         // before any command, and `start` already observed an empty permit.
         match self.inner.write.try_lock() {
@@ -899,12 +1010,21 @@ impl RpcClient {
     /// second command cannot append bytes into the middle of this line. It is not held across the
     /// reply oneshot.
     async fn write_line(&self, line: &[u8]) -> std::io::Result<()> {
-        #[cfg(not(unix))]
+        #[cfg(not(any(unix, windows)))]
         {
             let _ = line;
             Err(std::io::Error::other(
                 "rpc host sockets are not supported on this platform yet",
             ))
+        }
+        #[cfg(windows)]
+        {
+            use tokio::io::AsyncWriteExt;
+            let mut guard = self.inner.write.lock().await;
+            let pipe = guard
+                .as_mut()
+                .ok_or_else(|| std::io::Error::other("RPC transport is not writable."))?;
+            pipe.write_all(line).await
         }
         #[cfg(unix)]
         {
@@ -1873,7 +1993,7 @@ fn dispatch_event(inner: &RpcMux, event: &Value) {
     inner.notify.notify_waiters();
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn on_line(inner: &RpcMux, line: &str) {
     let Ok(value) = serde_json::from_str::<Value>(line) else {
         return;
@@ -1984,10 +2104,10 @@ fn try_write_line(
     Ok(true)
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn spawn_reader(
     inner: std::sync::Arc<RpcMux>,
-    mut read: tokio::net::UnixStream,
+    mut read: impl tokio::io::AsyncRead + Unpin + Send + 'static,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         use tokio::io::AsyncReadExt;

@@ -1,4 +1,123 @@
 use maho_cli::cli::host_command::*;
+
+#[cfg(windows)]
+#[tokio::test]
+async fn windows_host_session_list_authenticates_and_returns_session_rows() {
+    use maho_rpc::{host_lifecycle::win32_pipe, socket_transport};
+    use serde_json::{Value, json};
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("host.sock");
+    let endpoint = path.to_str().unwrap();
+    let key_path = socket_transport::socket_secret_path(endpoint).unwrap();
+    let secret = socket_transport::create_socket_secret(std::path::Path::new(&key_path)).unwrap();
+    let address =
+        socket_transport::resolve_socket_transport_address(endpoint, "win32", Some(&secret))
+            .unwrap();
+    let mut pipe = win32_pipe::create_first_instance(&address).unwrap();
+    let (finish, finished) = tokio::sync::oneshot::channel();
+    let serve = async {
+        tokio::time::timeout(std::time::Duration::from_secs(10), pipe.connect())
+            .await
+            .expect("CLI connected to the Windows named pipe")
+            .unwrap();
+        socket_transport::authenticate_socket(&mut pipe, &secret)
+            .await
+            .unwrap();
+        let (read, mut write) = tokio::io::split(pipe);
+        let mut lines = BufReader::new(read).lines();
+        for (kind, data) in [
+            (
+                "list_sessions",
+                json!({"sessions":[{"sessionId":"rpc-win-test"}]}),
+            ),
+            (
+                "get_protocol_info",
+                json!({"capabilities":["detach_connection"]}),
+            ),
+            ("detach_connection", json!({"deferred":[]})),
+        ] {
+            let line = tokio::time::timeout(std::time::Duration::from_secs(3), lines.next_line())
+                .await
+                .unwrap_or_else(|_| panic!("timed out waiting for CLI command {kind}"))
+                .unwrap()
+                .unwrap_or_else(|| panic!("CLI exited before sending {kind}"));
+            let request: Value = serde_json::from_str(&line).unwrap();
+            assert_eq!(request["type"], kind);
+            let response = json!({"type":"response","id":request["id"],"success":true,"data":data});
+            write
+                .write_all(format!("{response}\n").as_bytes())
+                .await
+                .unwrap();
+        }
+        // Leave the pipe open until the client has received and processed the detach ack.
+        finished.await.unwrap();
+    };
+    let run = async {
+        let result = tokio::process::Command::new(env!("CARGO_BIN_EXE_mhc"))
+            .args(["host", "session", "list", "--socket", endpoint, "--json"])
+            .env("HOME", dir.path())
+            .env("USERPROFILE", dir.path())
+            .env("OMO_CODING_AGENT_DIR", dir.path())
+            .kill_on_drop(true)
+            .output()
+            .await
+            .unwrap();
+        finish.send(()).unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let reply: Value = serde_json::from_slice(&result.stdout).unwrap();
+        assert_eq!(reply["sessions"][0]["sessionId"], "rpc-win-test");
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(25), async {
+        tokio::join!(run, serve);
+    })
+    .await
+    .expect("Windows CLI completed the authenticated named-pipe round trip");
+}
+
+#[test]
+fn drain_wait_accepts_upstream_numeric_forms_but_rejects_unsafe_integers() {
+    for (text, expected) in [(" 1e2 ", 100), ("0x20", 32), ("+3.0", 3)] {
+        let args = ["stop", "--drain", "--wait-ms", text].map(str::to_owned);
+        assert_eq!(parse_host_args(&args).unwrap().wait_ms, Some(expected));
+    }
+    for text in ["0", "1.5", "0x+1", "9007199254740992", "Infinity"] {
+        let args = ["stop", "--drain", "--wait-ms", text].map(str::to_owned);
+        assert!(parse_host_args(&args).is_err(), "{text}");
+    }
+}
+
+#[test]
+fn ensure_cannot_claim_an_extension_with_no_native_port() {
+    let temp = tempfile::tempdir().unwrap();
+    let spec = temp.path().join("spec.json");
+    std::fs::write(
+        temp.path().join("arbitrary-unported-script.ts"),
+        "export default () => {};",
+    )
+    .unwrap();
+    std::fs::write(&spec, r#"{"spec_version":1,"core":{"session_runtime":"worker","multi_session":true,"extensions":["arbitrary-unported-script.ts"]}}"#).unwrap();
+    let args = ["ensure", "--launch-spec", spec.to_str().unwrap()].map(str::to_owned);
+    let parsed = parse_host_args(&args).unwrap();
+    let Err(error) =
+        maho_cli::cli::host_request::build_host_request(&parsed, "unused.sock", temp.path())
+    else {
+        panic!("a launch request must not claim an unported extension");
+    };
+    assert_eq!(error.exit_code(), 1);
+    assert_eq!(error.payload()["reason"], "host_error");
+    assert!(
+        error.payload()["detail"]
+            .as_str()
+            .unwrap()
+            .contains("has no native port")
+    );
+}
 #[test]
 fn host_options_parse_and_last_policy_wins() {
     let args = [

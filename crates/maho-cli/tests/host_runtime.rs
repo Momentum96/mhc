@@ -295,6 +295,18 @@ async fn a_mounted_session_is_bound_to_the_per_runtime_cwd() {
     assert_eq!(mounted.runtime.cwd(), project_text.as_str());
     assert_eq!(mounted.session().cwd(), project_text.as_str());
     assert_ne!(mounted.session().cwd(), launch_text.as_str());
+    let state = maho_rpc::rpc_session_state::build_rpc_session_state(mounted.session(), None);
+    let lifecycle = &state["lifecycle"];
+    assert_eq!(
+        lifecycle["state"],
+        mounted.session().lifecycle_snapshot()["state"]
+    );
+    assert!(lifecycle["state"].is_string());
+    assert!(lifecycle["observedAt"].is_string());
+    assert_eq!(
+        state.get("pendingModelSwitch"),
+        Some(&serde_json::Value::Null)
+    );
     mounted.session().dispose().await;
 }
 

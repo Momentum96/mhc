@@ -23,7 +23,6 @@ import tempfile
 from pathlib import Path
 from typing import Callable, NotRequired, TypedDict
 
-# Keep the sibling import below from writing __pycache__ next to this script.
 sys.dont_write_bytecode = True
 
 from cookie_crypto import (

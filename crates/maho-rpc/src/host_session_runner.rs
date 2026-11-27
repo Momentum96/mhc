@@ -280,7 +280,7 @@ async fn run_host_session_request_once(
         agent_dir: Some(agent_dir.clone()),
         ..Default::default()
     });
-    match client.start().await {
+    match client.start_public().await {
         Ok(()) => {}
         Err(RpcClientError::Transport(error))
             if matches!(
@@ -897,9 +897,22 @@ mod tests {
 
     impl Rig {
         fn new(seed: impl FnOnce(&mut Fake)) -> Self {
+            Self::with_auth(false, seed)
+        }
+
+        fn with_auth(require_token: bool, seed: impl FnOnce(&mut Fake)) -> Self {
             let dir = tempfile::tempdir().expect("tempdir for rig");
             let socket = dir.path().join("host.sock");
             let listener = tokio::net::UnixListener::bind(&socket).expect("bind rig listener");
+            let endpoint = require_token.then(|| {
+                let endpoint = crate::rpc_public_key::RpcPublicEndpoint::new(
+                    dir.path(),
+                    &socket.to_string_lossy(),
+                )
+                .expect("create endpoint key");
+                endpoint.publish().expect("publish endpoint key");
+                Arc::new(endpoint)
+            });
             let mut fake = Fake::default();
             seed(&mut fake);
             let fake = Arc::new(Mutex::new(fake));
@@ -907,8 +920,16 @@ mod tests {
             tokio::spawn(async move {
                 while let Ok((stream, _)) = listener.accept().await {
                     let fake = shared.clone();
+                    let stream: Box<dyn TestSocket> = match &endpoint {
+                        Some(endpoint) => Box::new(crate::rpc_public_auth::public_rpc_stream(
+                            stream,
+                            endpoint.clone(),
+                            true,
+                        )),
+                        None => Box::new(stream),
+                    };
                     tokio::spawn(async move {
-                        let (read, mut write) = stream.into_split();
+                        let (read, mut write) = tokio::io::split(stream);
                         let mut lines = BufReader::new(read).lines();
                         let mut attached = Vec::new();
                         while let Ok(Some(line)) = lines.next_line().await {
@@ -965,6 +986,22 @@ mod tests {
                     .collect()
             })
         }
+    }
+
+    trait TestSocket: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send {}
+    impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send> TestSocket for T {}
+
+    #[tokio::test]
+    async fn session_list_proves_the_key_before_sending_commands_under_enforcement() {
+        let rig = Rig::with_auth(true, |fake| fake.seed("rpc-1", None, 0));
+        let outcome = crate::host_probe::with_rpc_key_root(
+            rig.target.agent_dir.clone(),
+            rig.run(HostSessionAction::List),
+        )
+        .await;
+        assert_eq!(outcome.exit_code, HOST_EXIT_OK, "{}", outcome.payload);
+        assert_eq!(outcome.payload["sessions"][0]["sessionId"], "rpc-1");
+        assert_eq!(rig.seen("list_sessions").len(), 1);
     }
 
     fn reference(id: &str) -> SessionRef {
