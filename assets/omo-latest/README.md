@@ -1,6 +1,6 @@
 # `assets/omo-latest` — repository-owned latest skill assets
 
-This tree is the **explicit source of the latest-mode skill assets**. It exists so
+This tree is the **explicit source of the latest (since-pin) skill assets**. It exists so
 `tools/package-native.mjs --skill-source latest` can stage the latest skill set from the repository
 itself, instead of inferring "latest" from a host checkout whose `PINS.md` commit is the *pinned*
 revision. Nothing here is generated at build time and nothing here is written by the packaging
@@ -8,22 +8,23 @@ script.
 
 ## Why an overlay instead of the pinned checkout
 
-`--omo-root` points at the **pinned** `oh-my-openagent` checkout (`PINS.md` → v5.1.81,
-`5835a98e…`). The overlay is synced to that same commit, but latest mode reads this
-self-describing tree rather than a host checkout. This makes the shipped roster, local MIT
-exception, and browser runtime identity explicit.
+`--omo-root` points at the **pinned** `oh-my-openagent` checkout (`PINS.md` → `77f3067f…`). That
+checkout does **not** contain the latest assets: it still ships `start-work` and has neither
+`browser` nor `ulw-execute`. Reading latest assets from it would be a silent mixture of two
+revisions, so the overlay is a separate, self-describing tree and the pinned checkout is never
+consulted in latest mode.
 
 ## Modes
 
 | Mode | Flag | Skill source | git-bash sibling | Notes |
 | --- | --- | --- | --- | --- |
-| pinned (default, baseline) | *(none)* / `--skill-source pinned` | `--omo-root` pinned checkout, `packages/omo-senpi/skills` over `packages/shared-skills/skills` | optional (`--git-bash-binary` may be absent) | uses the packager's pinned roster |
+| pinned (default, baseline) | *(none)* / `--skill-source pinned` | `--omo-root` pinned checkout, `packages/omo-senpi/skills` over `packages/shared-skills/skills` | optional (`--git-bash-binary` may be absent) | byte-for-byte today's behaviour; still stages `start-work` |
 | latest (selected product) | `--skill-source latest` | this overlay only | **required** (`--git-bash-binary <built omo-git-bash>`) | stages `selection`, retires `retired`, never reads `--omo-root`; also **requires** `--omowright-runtime <dir>` for the `browser` skill's engine runtime |
 
 `PINS.md` is never modified by either mode: `provenanceErrors()` requires both pins to be full
 commits in every mode, and latest mode additionally requires the overlay's own `commit` to be a full
 commit that is **not** the pinned omo commit, unless the overlay declares `pinCommit` equal to it
-(an overlay synced exactly at the pin, as for omo v5.1.81).
+(an overlay synced exactly at the pin, as for omo v5.1.52).
 
 ## The selected product staging
 
@@ -32,7 +33,7 @@ actual built `omo-git-bash` sibling. It is the only staging that delivers the gi
 
 ```bash
 node assets/omo-latest/stage-omowright-runtime.mjs \
-  --source <omowright checkout @ bd3843cc9625d87cafa00c08cfc9f0c995d1aab6> \
+  --source <omowright checkout @ 293ca5002cbd4c8b0c104c5934683385ef7e0d3a> \
   --target assets/omo-latest/runtime/browser/omowright
 bun tools/package-native.mjs --binary "$BIN" --output "$E/install" \
   --skill-source latest --git-bash-binary "$BIN_DIR/omo-git-bash" \
@@ -49,36 +50,36 @@ git-bash flag — there are no aliases. The staged manifest declares the sibling
 
 | Path | Meaning |
 | --- | --- |
-| `manifest.json` | the machine-consumed overlay contract (identity, selection, retired, per-skill file lists, historical H1–H13 inventory, loader + content binding) |
+| `manifest.json` | the machine-consumed overlay contract (identity, selection, retired, per-skill file lists, H1–H13 inventory, loader + content binding) |
 | `skills/<name>/**` | the exact latest bytes of every selected skill, precedence already resolved |
 | `skills/AGENTS.md` | the `packages/omo-senpi/skills/AGENTS.md` pool-root developer doc (carried verbatim, not a staged skill) |
 | `stage-omowright-runtime.mjs` | the repository-owned materializer for the `browser` skill's engine runtime (build-time only; the repository holds no committed runtime) |
 | `runtime/.gitignore` | ignores the materialized `runtime/browser/omowright/` directory, exactly as upstream gitignores the runtime |
 | `PROVENANCE.md` | overlay-side provenance and license note |
+| `../../authoring/assets.md` | the L-IF-2 authoring receipt (required path) |
 
 ## `manifest.json` (machine-consumed)
 
 | Field | Meaning |
 | --- | --- |
-| `commit` / `sourceRepo` | the immutable source of the upstream bytes (v5.1.81, `5835a98e…`) |
+| `commit` / `sourceRepo` | the immutable latest identity the bytes were taken from (`455dee62…`) |
 | `pinCommit` / `pinSenpi` | the pins that stay unchanged |
-| `versions` | `omoSenpi` 5.1.81 / `sharedSkills` 0.1.0, recorded into the staged manifest in latest mode |
+| `versions` | `omoSenpi` 5.1.20 / `sharedSkills` 0.1.0, recorded into the staged manifest in latest mode |
 | `precedence` | `packages/omo-senpi/skills` over `packages/shared-skills/skills` |
-| `selection` | the 28 v5.1.81 skill names staged in latest mode (= `targetNames`) |
-| `retired` | `adversarial-plan`, `start-work` |
+| `selection` | the 26 latest skill names staged in latest mode (= `targetNames`) |
+| `retired` | `start-work` |
 | `poolDocs` | pool-root docs carried but not staged as skills |
 | `skills` | per skill, the exact file list with `path`/`bytes`/`sha256`/upstream `source` |
-| `targets` | the historical H1–H13 inventory at `targetInventoryProvenance.commit`; not the current file list |
+| `targets` | the H1–H13 inventory with per-row file lists |
 | `loader` | the installed-loader binding: `OMO_SENPI_SKILLS_ROOT` → `<install>/skills`, consumed by `omo_mount.rs` |
 | `contentBinding` | complete-content binding: see `contentBinding` counts, the rest bound at the gate |
 | `browserRuntime` | the `browser` skill's build-materialized engine runtime: skill, target dir, materializer, immutable `omowright` identity, version and the exact runtime files |
 
 ## Browser engine runtime (build-materialized, never committed)
 
-Upstream ships `skills/browser/runtime/omowright/{index.js,page-bundle.js,LICENSE,manifest.json}` — the
+Upstream ships `skills/browser/runtime/omowright/{index.js,page-bundle.js,manifest.json}` — the
 `browser` skill's engine, bundled from the root `omowright` devDependency
-(`^0.3.1`, locked in `bun.lock` to 0.3.1, whose npm `gitHead` matches tag `v0.3.1` at
-`bd3843cc9625d87cafa00c08cfc9f0c995d1aab6`) at build/prepack time by
+(`github:code-yeongyu/omowright#293ca5002cbd4c8b0c104c5934683385ef7e0d3a`) at build/prepack time by
 `packages/shared-skills/stage-omowright-runtime.mjs`. The directory is gitignored and shipped through
 the skill's `.npmignore`; without it, `skills/browser/scripts/omowright.mjs` throws *"omowright is
 not staged in this skill"*.
@@ -95,7 +96,7 @@ bun tools/package-native.mjs --binary "$BIN" --output "$E/install" --skill-sourc
   --git-bash-binary "$BIN_DIR/omo-git-bash" --omowright-runtime <dir>
 ```
 
-`manifest.json.browserRuntime` declares the runtime's identity (package, dependency spec, immutable commit,
+`manifest.json.browserRuntime` declares the runtime's identity (package, git spec, immutable commit,
 version) and the exact runtime files. Staging requires an explicit `--omowright-runtime <dir>` whose
 own `manifest.json` records that same commit, records the runtime version and source digest plus
 each runtime file's sha256 in the staged package manifest, and **refuses** a content-only `browser`
@@ -127,19 +128,18 @@ bridge.
 The overlay is the **already-merged** latest skill set. Where a name exists in both upstream pools
 (`init-deep`, `ulw-plan`, `ulw-research`), the `packages/omo-senpi/skills` copy wins, exactly as
 `sync-skills.mjs` does. `ulw-research` additionally carries the shared-pool assets that
-`native-skill-sources.mjs` overlays (`scripts/**` and the seven declared shared references);
-the shadowed shared `SKILL.md` is not shipped. Unlike `sync-skills.mjs`, the overlay does not
-rewrite the copied text.
+`native-skill-sources.mjs` overlays (`scripts/**`, `references/report-gates.md`,
+`references/deliverable-phase.md`); the shadowed shared `SKILL.md` is not shipped.
 
-The upstream v5.1.81 `skill-source-filter.mjs` excludes `.gitignore`, `.npmignore`,
-`pyrightconfig.json`, `knip.workspace.jsonc`, `openai.yaml` (Senpi option), `*.test.ts`,
-`*.pyc`, nested test directories, and caches. A skill's own top-level `test/` and `tests/`
-directories may ship.
+The bytes were taken through the same copy filter the packaging uses
+(`skill-source-filter.mjs` / `shouldSkipEntry`): `.gitignore`, `.npmignore`, `pyrightconfig.json`,
+`openai.yaml`, `*.test.ts`, `*.pyc`, `scripts/tests/**` and the cache directories are excluded, so
+the overlay file set is exactly what a distribution would carry.
 
 ## Provenance and license
 
-With the two local MIT ultrawork files listed in `PROVENANCE.md` excepted, skill files here
-are byte copies of the immutable checkout at `commit`, under the same terms as the
+Files here are byte copies of the immutable latest checkout at `commit`, under the same terms as the
 rest of the skill set: omo-derived assets ship under `LicenseRef-SUL-1.0`
-(`LICENSES/SUL-1.0.md`). Third-party notices in the source trees are carried unchanged.
-`PROVENANCE.md` records the provenance.
+(`LICENSES/SUL-1.0.md`). `browser/ATTRIBUTION.md` carries the skill's own third-party notices; no
+third-party license text is stripped or rewritten. `PROVENANCE.md` and `authoring/assets.md` record
+the provenance.

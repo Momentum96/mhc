@@ -4,9 +4,9 @@
 //   node assets/omo-latest/stage-omowright-runtime.mjs --source <omowright checkout> [--target <dir>]
 //   node assets/omo-latest/stage-omowright-runtime.mjs --check --source <omowright checkout>
 //
-// Upstream (`packages/shared-skills/stage-omowright-runtime.mjs` at v5.1.81) bundles the root
+// Upstream (`packages/shared-skills/stage-omowright-runtime.mjs` at `455dee62…`) bundles the root
 // `omowright` devDependency into `skills/browser/runtime/omowright/`: one self-contained ESM entry,
-// the page bundle it reads at import time, the MIT license, and a manifest carrying the source version, the source
+// the page bundle it reads at import time, and a manifest carrying the source version, the source
 // digest and each staged file's sha256. The directory is gitignored upstream and shipped through the
 // skill's `.npmignore`; this repository holds no committed copy either (see
 // `assets/omo-latest/runtime/.gitignore`).
@@ -27,7 +27,6 @@
 // upstream ships, and `dec-a-02` (browsers, engines, permission protocol) stays an owner choice.
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync } from "node:fs";
 import { access, copyFile, mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -38,17 +37,11 @@ const overlayManifestPath = join(overlayRoot, "manifest.json");
 const defaultTargetDir = join(overlayRoot, "runtime", "browser", "omowright");
 
 /** The runtime files the staged package must carry, in the order upstream stages them. */
-export const STAGED_FILES = Object.freeze(["index.js", "page-bundle.js", "LICENSE", "manifest.json"]);
+export const STAGED_FILES = Object.freeze(["index.js", "page-bundle.js", "manifest.json"]);
 /** The runtime manifest upstream's `stage-omowright-runtime.mjs` writes. */
 export const RUNTIME_MANIFEST_NAME = "manifest.json";
-const RUNTIME_PAYLOAD_FILES = STAGED_FILES.filter((name) => name !== RUNTIME_MANIFEST_NAME);
-const PAGE_BUNDLE_SOURCE = "src/page-bundle.js";
-
-/** The checked-out library uses TypeScript now; keep support for the earlier JS checkout. */
-function sourceLayout(sourceRoot) {
-	const ext = existsSync(join(sourceRoot, "src", "index.ts")) ? "ts" : "js";
-	return { entry: `src/index.${ext}`, core: `src/core.${ext}` };
-}
+/** The upstream source entries the digest covers (upstream's `sourceDigest` list, in order). */
+export const SOURCE_DIGEST_ENTRIES = Object.freeze(["package.json", "src/index.js", "src/page-bundle.js", "src/core.js"]);
 
 const COMMIT_PATTERN = /^[0-9a-f]{40}$/;
 
@@ -82,16 +75,16 @@ async function readSourceVersion(sourceRoot) {
 }
 
 /** Upstream's `sourceDigest`: the named source entries, in order, length-prefixed with NUL. */
-async function sourceDigest(sourceRoot, { entry, core }) {
+async function sourceDigest(sourceRoot) {
 	const hash = createHash("sha256");
-	for (const path of ["package.json", "LICENSE", entry, PAGE_BUNDLE_SOURCE, core]) {
+	for (const entry of SOURCE_DIGEST_ENTRIES) {
 		let content;
 		try {
-			content = await readFile(join(sourceRoot, path));
+			content = await readFile(join(sourceRoot, entry));
 		} catch (error) {
-			throw new Error(`omowright source is missing ${path} (${join(sourceRoot, path)}): ${error.message}`);
+			throw new Error(`omowright source is missing ${entry} (${join(sourceRoot, entry)}): ${error.message}`);
 		}
-		hash.update(path).update("\0").update(content);
+		hash.update(entry).update("\0").update(content);
 	}
 	return hash.digest("hex");
 }
@@ -115,10 +108,10 @@ async function overlayIdentityCommit() {
 }
 
 /** Upstream's `bundle`: one self-contained ESM entry built from the omowright source. */
-function bundle({ sourceRoot, entry, outFile, bunExecutable }) {
+function bundle({ sourceRoot, outFile, bunExecutable }) {
 	const result = spawnSync(
 		bunExecutable,
-		["build", join(sourceRoot, entry), "--target=node", "--format=esm", "--minify-whitespace", `--outfile=${outFile}`],
+		["build", join(sourceRoot, "src", "index.js"), "--target=node", "--format=esm", "--minify-whitespace", `--outfile=${outFile}`],
 		{ cwd: sourceRoot, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
 	);
 	if (result.status !== 0) throw new Error(`bun build failed for omowright: ${result.stderr || result.stdout}`);
@@ -137,8 +130,7 @@ export async function stageOmowrightRuntime(options = {}) {
 	const identity = await resolveIdentity(options.identity);
 
 	const version = await readSourceVersion(sourceRoot);
-	const layout = sourceLayout(sourceRoot);
-	const digest = await sourceDigest(sourceRoot, layout);
+	const digest = await sourceDigest(sourceRoot);
 	const head = gitHead(sourceRoot);
 	if (head === null) throw new Error(`omowright source is not a git checkout, so its immutable identity cannot be proven: ${sourceRoot}`);
 	if (head !== identity) throw new Error(`omowright source is at ${head}, not the declared commit ${identity}`);
@@ -151,11 +143,10 @@ export async function stageOmowrightRuntime(options = {}) {
 	let targetMoved = false;
 	try {
 		await mkdir(tempDir, { recursive: true });
-		bundle({ sourceRoot, entry: layout.entry, outFile: join(tempDir, "index.js"), bunExecutable });
-		await copyFile(join(sourceRoot, PAGE_BUNDLE_SOURCE), join(tempDir, "page-bundle.js"));
-		await copyFile(join(sourceRoot, "LICENSE"), join(tempDir, "LICENSE"));
+		bundle({ sourceRoot, outFile: join(tempDir, "index.js"), bunExecutable });
+		await copyFile(join(sourceRoot, "src", "page-bundle.js"), join(tempDir, "page-bundle.js"));
 		const files = {};
-		for (const name of RUNTIME_PAYLOAD_FILES) files[name] = await sha256(join(tempDir, name));
+		for (const name of ["index.js", "page-bundle.js"]) files[name] = await sha256(join(tempDir, name));
 		await writeFile(
 			join(tempDir, RUNTIME_MANIFEST_NAME),
 			`${JSON.stringify({ name: "omowright", version, commit: identity, sourceDigest: digest, files, stagedAtUtc: new Date().toISOString() }, null, 2)}\n`,
@@ -187,7 +178,7 @@ export async function checkOmowrightRuntimeFresh(options = {}) {
 	const sourceRoot = resolve(options.sourceRoot ?? process.env.OMO_OMOWRIGHT_SOURCE ?? "");
 	const targetDir = resolve(options.targetDir ?? defaultTargetDir);
 	const identity = await resolveIdentity(options.identity);
-	const digest = await sourceDigest(sourceRoot, sourceLayout(sourceRoot));
+	const digest = await sourceDigest(sourceRoot);
 	const head = gitHead(sourceRoot);
 	if (head === null) throw new Error(`omowright source is not a git checkout, so its immutable identity cannot be proven: ${sourceRoot}`);
 	if (head !== identity) throw new Error(`omowright source is at ${head}, not the declared commit ${identity}`);
@@ -200,7 +191,7 @@ export async function checkOmowrightRuntimeFresh(options = {}) {
 	}
 	if (manifest.commit !== identity) throw new Error(`omowright runtime stale: staged commit ${manifest.commit} does not match ${identity}`);
 	if (manifest.sourceDigest !== digest) throw new Error(`omowright runtime stale: staged sourceDigest ${manifest.sourceDigest} does not match ${digest}`);
-	for (const name of RUNTIME_PAYLOAD_FILES) {
+	for (const name of ["index.js", "page-bundle.js"]) {
 		let actual;
 		try {
 			actual = await sha256(join(targetDir, name));

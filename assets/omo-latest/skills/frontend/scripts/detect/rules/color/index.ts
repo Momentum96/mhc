@@ -10,13 +10,6 @@ import { radialHalo } from "./radial-halo"
 import { radialSpotlightGlow } from "./radial-spotlight-glow"
 
 export const COLOR_RULES: readonly PageRule[] = [
-  lowContrast,
-  grayOnColor,
-  aiColorPalette,
-  creamPalette,
-  gradientText,
-  darkGlow,
-  radialHalo,
-  radialSpotlightGlow,
-  designSystemColor,
+	lowContrast, grayOnColor, aiColorPalette, creamPalette, gradientText,
+	darkGlow, radialHalo, radialSpotlightGlow, designSystemColor,
 ]

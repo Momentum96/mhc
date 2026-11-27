@@ -1,45 +1,48 @@
 ---
 name: ultimate-browsing
-description: "Reaches web pages the user's browser cannot open: WAF-blocked and bot-scored hosts, platform-native readers (Chinese and social platforms), archive snapshots with provenance, and a browser you own for stealth or throwaway profiles. Not for plain search, an unblocked static fetch, or a page the user's browser can open."
+description: "Use whenever a plain fetch cannot finish the job: pages that only render with JavaScript, driving a page (clicks, form fills, scrolling), screenshots, logins that must persist across pages, and WAF- or bot-blocked hosts (via platform-native readers and stealth Chrome). Also the browsing lane of a multi-source research run, where screenshots serve as provenance evidence. Not for plain search or an unblocked static fetch."
 ---
 
 # Ultimate Browsing
 
-Web access for the hosts the user's browser cannot open (WAF / 403 / Cloudflare / bot-scored pages) and for platforms with a native reader. Reading and interaction on a page the user's browser can open belong to the `browser` skill's attached engine, not here. Start at the cheapest tier that can reach the blocked host and climb only when it cannot:
+Web access for everything a plain fetch cannot finish: JavaScript-rendered pages, clicks and form fills, screenshots, logins that must persist across pages, and hosts that block generic fetchers (WAF / 403 / Cloudflare / bot scoring). Start at the cheapest tier that can do the job and climb only when it cannot:
 
-**Tier 1 — insane-search** (headless extraction + WAF bypass) -> **Tier 1.5 — agent-reach** (platform-native APIs, esp. Chinese platforms) -> **Tier 2 — a real browser** through omowright from js eval: 2a the owned engine (a browser your code launches, CloakBrowser for stealth), 2b the attached engine (the user's own signed-in browser).
+**Tier 1 — insane-search** (headless extraction + WAF bypass) -> **Tier 1.5 — agent-reach** (platform-native APIs, esp. Chinese platforms) -> **Tier 2 — a real browser** from js eval: 2a the owned browser engine (bundled with the `browser` skill; a browser your code launches, CloakBrowser for stealth), 2b the attached engine (the user's own signed-in browser).
 
 ## PHASE 0 — ROUTE FIRST (MANDATORY)
 
 ```
 User request
   |
-  +- a page the user's browser can open (read, click, screenshot, QA, login)  NOT this skill (browser skill, attached engine)
-  +- simple search query ------------------------------ NOT this skill (use web search)
-  |
+  +- extract text or data from a URL ------------------- TIER 1  insane-search
+  +- article / blog post / Reddit / Hacker News / arXiv  TIER 1  insane-search (official endpoints first)
   +- URL blocked / 403 / Cloudflare / WAF ------------- TIER 1  insane-search
   +- YouTube/Vimeo/TikTok subtitles or metadata ------- TIER 1  insane-search (yt-dlp)
   +- archive snapshot of a dead or changed page ------- TIER 1  insane-search (surrogates, provenance-tagged)
   |
   +- Chinese platform (xhs/douyin/weibo/bilibili/v2ex/wechat)  TIER 1.5 agent-reach
-  +- podcast transcript ------------------------------- TIER 1.5 agent-reach
+  +- podcast transcript / stock forum ----------------- TIER 1.5 agent-reach
   +- Twitter feed / LinkedIn profile / GitHub via CLI - TIER 1.5 agent-reach
   |
-  +- Tier 1/1.5 returned empty or partial ------------- TIER 2  2a owned engine (stealth)
-  +- a blocked host that also needs a click, a scroll or a screenshot  TIER 2  2a owned engine
-  +- the user's account on a host the owned engine cannot pass  TIER 2  2b attached engine (their browser)
+  +- Tier 1/1.5 returned empty or partial ------------- TIER 2  2a owned engine -> 2b attached engine if 2a cannot finish
+  +- click / form fill / scroll / any interaction ----- TIER 2  2a owned engine -> 2b attached engine if 2a cannot finish
+  +- screenshot / rendered view / video playback ------ TIER 2  2a owned engine -> 2b attached engine if 2a cannot finish
+  +- web-app testing / QA / dogfooding ---------------- TIER 2  2a owned engine -> 2b attached engine if 2a cannot finish
+  +- login that spans pages, or the user's own account  TIER 2  2b attached engine directly
+  |
+  +- simple search query ------------------------------ NOT this skill (use web-search)
 ```
 
 Read the matching reference before acting: [`references/insane-search/README.md`](references/insane-search/README.md), [`references/agent-reach/README.md`](references/agent-reach/README.md), or [`references/chrome-stealth.md`](references/chrome-stealth.md).
 
 ## Tier 1 — insane-search (headless extraction)
 
-**When**: blocked-URL bypass, media metadata, archive surrogates — no browser UI needed.
+**When**: extracting content from a URL, getting past a blocked URL, media metadata, archive surrogates — anything that needs no browser UI.
 **Why first**: ~10x faster than a browser, no process spin-up; handles most "fetch this blocked page" requests via curl_cffi TLS impersonation, yt-dlp (1858 sites), official public APIs, mobile URL transforms, **Phase-2.5 surrogate archives** (Wayback / archive.today snapshots, provenance-tagged — see [`references/insane-search/cache-archive.md`](references/insane-search/cache-archive.md)), a key-gated Jina Reader (`JINA_API_KEY`), and a Playwright real-Chrome fallback. The engine lives **inside this skill** at `engine/` and is invoked as a module. Surrogate results are dated COPIES: a result whose `provenance` is `snapshot` must be reported with its `snapshot_timestamp`, never presented as the live page.
 
 ```bash
-# Core command — auto-detects WAF, runs the full fetch grid (run from the skill dir).
-# Keep -B: this skill can live inside a signed app bundle, and bytecode caches written into engine/ break its signature.
+# Core command — auto-detects WAF, runs the full fetch grid (run from the skill dir):
+# Pass -B so Python never drops __pycache__ into engine/ (the skill may ship inside a signed bundle).
 python3 -B -m engine "https://example.com/blocked-page"
 #   add --selector "<CSS>" for positive-proof validation, --device auto|desktop|mobile,
 #   --trace to inspect every attempt, --json for machine-readable output.
@@ -55,7 +58,7 @@ The full engine harness (rules R1-R7, the Phase 0 official-API index, the no-sit
 
 ### Escalate to Tier 1.5 or Tier 2 when
 - The target is a Chinese / social platform with a native reader -> Tier 1.5.
-- insane-search returns empty/partial, or the blocked page needs JS interaction, a screenshot, or media playback -> Tier 2.
+- insane-search returns empty/partial, or the page needs JS interaction, a screenshot, media playback, or a login that persists across pages -> Tier 2.
 
 ## Tier 1.5 — agent-reach (platform-native readers)
 
@@ -71,8 +74,8 @@ The full engine harness (rules R1-R7, the Phase 0 official-API index, the no-sit
 | search | Exa AI | [references/agent-reach/search.md](references/agent-reach/search.md) |
 
 ```bash
-mcporter call 'douyin.parse_douyin_video_info(share_link: "<URL>")'   # douyin, zero-config
-curl -s -H "Authorization: Bearer ${JINA_API_KEY}" "https://r.jina.ai/https://weibo.com/<uid>/<pid>"   # weibo via Jina (key required)
+mcporter call 'douyin.parse_douyin_video_info(url: "<URL>")'   # douyin, zero-config
+curl -s "https://r.jina.ai/https://weibo.com/<uid>/<pid>"      # weibo via Jina
 yt-dlp --dump-json "<bilibili-url>"                            # Bilibili (overseas: add --cookies-from-browser)
 curl -s "https://www.v2ex.com/api/topics/hot.json"            # V2EX public API
 ```
@@ -81,9 +84,9 @@ Routing table, per-platform auth (set `TWITTER_*` env vars, `gh auth login`, a t
 
 ## Tier 2 — a real browser (real interaction)
 
-**When**: Tier 1/1.5 failed on a blocked host, or that host needs interaction (clicks, scroll, screenshots, video). A page the user's browser can open is the `browser` skill's job, attached engine first.
+**When**: the task needs real interaction — clicks, forms, scrolling, screenshots, video, a login that persists across pages — or Tier 1/1.5 came back empty or partial. Try 2a first; move to 2b when 2a cannot finish or the task needs the user's own account.
 
-Both tiers are omowright, staged inside the `browser` skill and loaded from js eval:
+Both sub-tiers use the browser library bundled with the `browser` skill, loaded from js eval (when that skill's session pins an engine through `OMO_BROWSER_ENGINE`, follow its Step 0 instead of this section):
 
 ```js
 const { loadOmowright } = await import("<browser-skill-root>/scripts/omowright.mjs")
@@ -109,25 +112,23 @@ try {
 
 The rest of the surface (CUA coordinates, captcha solving, routes, traces, frames, human handoff) is in the `browser` skill's `references/owned-engine/`. A stealth binary is not proof of access: inspect the rendered result and report challenges that remain.
 
-### Tier 2b — attached engine (the user's account on a blocked host)
+### Tier 2b — attached engine (logged-in pages)
 
-When the blocked flow needs the user's account, drive the browser they are already signed into instead of cloning their profile: `connectBrowserSkill()` → `session.navigate` → `bskSnapshot(session)` / `session.observe()` → `session.click` → `session.stop()`, each page action carrying `{ context }` from a fresh `session.cooperate("sync")` (BrowserSkill 0.4 refuses it otherwise). NEVER launch against or clear cookies/cache/site data from the user's live profile, and never fall back to the owned engine for an authenticated criterion: if no extension is connected, run the `browser` skill's onboarding script and relay its one human step. The full loop is the `browser` skill.
+When a page needs the user's account — any logged-in page, blocked host or not — drive the browser they are already signed into instead of cloning their profile: `connectBrowserSkill()` → `session.navigate` → `bskSnapshot(session)` / `session.observe()` → `session.click` → `session.stop()`. NEVER launch against or clear cookies/cache/site data from the user's live profile, and never fall back to the owned engine for an authenticated criterion: if no extension is connected, run the `browser` skill's onboarding script and relay its one human step. The full loop is the `browser` skill.
 
 ### Cookie login (cross-platform)
 
-A login the user holds goes through Tier 2b, never through their cookies: the `browser` skill forbids copying a session out of the user's real browser profile (`references/owned-engine/network.md`, Cookies).
-
-`scripts/extract_cookies.py` reads cookies from the default profile store of a local Chromium-family or Firefox-family browser and optionally injects them over CDP. It resolves browser profile paths and decrypts cookie values per-OS (macOS Keychain, Linux libsecret, Windows DPAPI). Because it always reads that default store, run it only where that browser profile is not the user's live profile (for example a dedicated automation account whose browser the task owns); on the user's own machine it would copy their session, so use Tier 2b instead.
+`scripts/extract_cookies.py` reads cookies from a local Chromium-family or Firefox-family browser and optionally injects them into the running CDP session. It resolves browser profile paths and decrypts cookie values per-OS (macOS Keychain, Linux libsecret, Windows DPAPI):
 
 ```bash
 # Extract cookies to a file:
 mkdir -p ~/.local/state/omo-cookies
 python3 -B scripts/extract_cookies.py --browser chrome --domain youtube.com --output ~/.local/state/omo-cookies/youtube.cookies.json
-# Extract and inject over CDP (needs a browser started with --remote-debugging-port=9242; connectPipe opens no port):
+# Extract and inject into the running CDP session:
 python3 -B scripts/extract_cookies.py --browser chrome --domain youtube.com --inject --cdp 9242
 ```
 
-For a Tier 2a owned page, load the exported file and call `omowright.injectCookies(page, cookies)` instead (see [references/chrome-stealth.md](references/chrome-stealth.md)). Cookie export files are written with owner-only `0600` permissions. Do not place live auth cookies in shared temp directories or commit them to a repo. Cookie injection sends values to CDP over stdin rather than argv. Cookies apply on next navigation — reload after injecting. Google services use fingerprint-bound tokens that may not transfer across browser profiles. Limits in [references/chrome-stealth.md](references/chrome-stealth.md).
+Cookie export files are written with owner-only `0600` permissions. Do not place live auth cookies in shared temp directories or commit them to a repo. Cookie injection sends values to CDP over stdin rather than argv. Cookies apply on next navigation — reload after injecting. Google services use fingerprint-bound tokens that may not transfer across browser profiles. Limits in [references/chrome-stealth.md](references/chrome-stealth.md).
 
 ## Reference docs
 
@@ -141,8 +142,7 @@ For a Tier 2a owned page, load the exported file and call `omowright.injectCooki
 
 ```bash
 # agent-reach auth: set the channel-specific env vars from each tool's docs only if you have access
-# insane-search: JINA_API_KEY only for the Jina Reader route (the engine skips that surrogate without it)
-# insane-search Python deps: the install one-liner in references/insane-search/README.md
+# insane-search needs no env vars — it auto-installs deps on first run
 ```
 
 ## Anti-patterns
@@ -152,3 +152,4 @@ For a Tier 2a owned page, load the exported file and call `omowright.injectCooki
 - Close every WebView/browser context when done and remove only task-owned profile clones.
 - Do NOT inject cookies without reloading the page.
 - Do NOT hardcode site domains/selectors into `engine/**` or `waf_profiles.yaml` — runtime hints only (see the no-site-name rule in the insane-search reference).
+- When this skill is the browsing lane of a multi-source research run (dispatched through `task`, a `team_*` member or a `workflow` step), return the extracted content with its URL and, for Tier 2, the screenshot path as provenance evidence.

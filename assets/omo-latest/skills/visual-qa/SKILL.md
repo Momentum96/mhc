@@ -3,9 +3,9 @@ name: visual-qa
 description: "Runs rigorous visual QA across web, terminal, and paginated surfaces: an Apple HIG-based checklist, paired light/dark captures at phone and desktop widths, screenshot evidence, and a per-item PASS/FAIL verdict. Use for any UI build or change, or when asked whether a page, component, or TUI looks right or follows the platform's design guidelines."
 ---
 
-# Visual QA - Dual-Oracle Web and TUI Verification
+# Visual QA - Dual-Reviewer Web and TUI Verification
 
-Verify a rendered UI against the platform baseline (the checklist below), against its brief and its reference when they exist, and against the stated intent: objective script evidence plus two parallel read-only oracle passes, synthesized into one per-item PASS/FAIL verdict inside a bounded review budget. The script numbers focus the reviewers. They are not the verdict.
+Verify a rendered UI against the platform baseline (the checklist below), against its brief and its reference when they exist, and against the stated intent: objective script evidence plus two parallel read-only reviewer passes, synthesized into one per-item PASS/FAIL verdict inside a bounded review budget. The script numbers focus the reviewers. They are not the verdict.
 
 ## Purpose and when to use
 
@@ -42,9 +42,23 @@ The verdict is per page. One failing page fails the whole surface, so "most page
 
 Every gate runs on captures produced AFTER the last edit to the rendered source. If any screenshot, PDF, capture, or QA JSON is older than the source file it claims to verify, it is stale and invalid - regenerate it before trusting it. Never report a PASS from an artifact you did not just produce against the current build. Between review rounds, re-capture only the pages a fix touched; the final approving round always judges a complete fresh set. The one deliberately old artifact is the `before` set of Step 6, which is dated to the pre-edit build on purpose.
 
-### Machine pre-check - the detect SDK before any reviewer
+### Machine pre-check - run the detect SDK before any reviewer
 
-On a web surface, run the `frontend` skill's detect SDK on every enumerated page before capturing for reviewers (`frontend/references/perfection/detect.md`: `detectPage({ kind: "url", url }, { reflow: true })`, or `bun <frontend skill dir>/scripts/detect/cli.ts --reflow --json <url>`). It reads the rendered page and reports contrast against the painted background, the type scale and heading order, overflow at 320-1440 px under an unbroken stress string, and decoration and copy tells. An error or warning is a FAIL on the matching checklist item (E2 contrast, B8 type scale, A9 or A13 layout, F8/F9 surfaces and scaffolds, C4 wrapping) before either reviewer looks; fix it and rerun. Keep the JSON beside the captures and hand it to both reviewers as evidence. Advisories go to the verdict's taste findings.
+Web surfaces only. Before a single reviewer is dispatched, run the `frontend` skill's detect SDK on every enumerated page (documented in `frontend/references/perfection/detect.md`):
+
+```
+detectPage({ kind: "url", url }, { reflow: true })
+```
+
+or from a shell:
+
+```
+bun <frontend skill dir>/scripts/detect/cli.ts --reflow --json <url>
+```
+
+What it inspects is the page as the browser painted it, never the source files: contrast measured against the background that is really painted behind the text; the type scale and the order of headings; overflow at every width from 320 to 1440 px with an unbroken stress string injected; and decoration and copy tells.
+
+Every error or warning is a FAIL on the matching checklist item before any reviewer sees the page: contrast maps to E2, type scale to B8, layout to A9 or A13, surfaces and scaffolds to F8/F9, wrapping to C4. Fix the source and run it again. Keep the JSON output beside the captures and paste it into both reviewer prompts as evidence. Advisories are not FAILs; carry them into the verdict as taste findings.
 
 ### Capture hygiene - validate before dispatching reviewers
 
@@ -59,7 +73,7 @@ Before any reviewer sees an image, verify each capture yourself: the file signat
 node "$SKILL_DIR/scripts/visual-qa.mjs" image-diff <reference.png> <actual.png>
 ```
 
-Key fields: `dimensionsMatch`, `diffRatio` (0..1), `similarityScore` (0..100), `alphaChannelIntact`, `hotspots[]` (grid regions ranked by `diffRatio`).
+Keep the whole JSON; its fields are listed under "Script output contract" below.
 
 For reference-fidelity work, repeat the capture and diff for every referenced viewport, page, and state. If the reference packet includes only one viewport, still capture the full matrix and record which captures are extrapolated from the `DESIGN.md` contract rather than directly pixel-compared.
 
@@ -74,23 +88,34 @@ await page.evaluate(() => [...document.querySelectorAll("*")]
 
 ### TUI
 
-1. Render the TUI through the REAL xterm.js web terminal and screenshot it -
-   NEVER `tmux capture-pane`, which degrades truecolor and misaligns wide (CJK)
-   glyphs. Run the command in a real pty and capture the browser render from the
-   repository root:
+1. Render the TUI from a REAL pty and screenshot it - NEVER `tmux capture-pane`,
+   which degrades truecolor and misaligns wide (CJK) glyphs. Run with bun from
+   the repository root:
 
 ```
-node script/qa/web-terminal-visual-qa.mjs --title "TUI Visual QA" \
-  --command "<tui-command>" \
+bun "$SKILL_DIR/scripts/tui-capture.mjs" --title "TUI Visual QA" \
+  --command "<tui-command>" --wait-for "<startup-regex>" \
   --input "{ArrowDown}" --input "{Enter}" \
   --evidence-dir .omo/evidence/<slug>/tui-web-terminal
 ```
 
-   Replay a saved raw stream with `--from-file <capture.ansi>` instead of
-   `--command`. This produces `terminal.png` (the true-color artifact),
-   `terminal.txt`, `terminal-ansi.txt`, and `metadata.json`. Treat this as the
-   standard TUI visual artifact pattern. Outside this repo, copy the pattern:
-   real pty -> xterm.js in a browser -> PNG + metadata with cleanup receipt.
+   The command runs in a `Bun.Terminal` pty at `--cols`/`--rows` (default
+   100x30) and is parsed by `@xterm/headless`. Every wait (`--wait-for`, default
+   the editor marker; `--then-wait` after the inputs; typed text echoing back) is
+   a screen predicate with a `--timeout` deadline, never a fixed sleep. Inputs
+   are typed in order; `{Enter}`, `{ArrowDown}`, `{ArrowUp}`, `{Esc}`, `{Tab}` and
+   `{Backspace}` are keys. `--offline-model` gives the command a disposable HOME
+   and agent dir with an `offline` provider (model `offline/offline-model`)
+   served by a local SSE stub, so no credentials or network are used. Replay a
+   saved raw stream with `--from-file <capture.ansi>` instead of `--command`.
+   Output: `terminal.txt` (viewport text), `terminal.ansi` (raw stream),
+   `cells.json` (char, fg, bg per viewport cell), `metadata.json` (command,
+   size, binary sha256, waits, teardown receipt) and `terminal.png` (the cells
+   rendered in `Bun.WebView`; `--no-png` skips it). `@xterm/headless` is
+   resolved from the skill's `node_modules`, then `tools/golden/node_modules`
+   above the cwd, then the bun install cache (`$BUN_INSTALL/install/cache`,
+   else `~/.bun/install/cache`, highest `@xterm/headless@*`), then
+   `node_modules`/`NODE_PATH`; if none has it the script exits 2.
 
 2. Run the width check on the produced text and keep the JSON:
 
@@ -98,9 +123,76 @@ node script/qa/web-terminal-visual-qa.mjs --title "TUI Visual QA" \
 node "$SKILL_DIR/scripts/visual-qa.mjs" tui-check .omo/evidence/<slug>/tui-web-terminal/terminal.txt --cols <N>
 ```
 
-Key fields: `maxWidth`, `expectedColumns`, `overflowLines[]`, `borderMisaligned`, `wideCharColumns[]`, `hasAnsi`.
+Keep the whole JSON; its fields are listed under "Script output contract" below.
 
-This JSON (diff ratio, similarity score, hotspots or overflow lines, border alignment, wide-char columns, alpha) is REFERENCE evidence to aim the reviewers. It is not the verdict by itself: a 99/100 `similarityScore` can still hide a pasted-image fake, a broken interaction, or clipped CJK descenders.
+### Script output contract
+
+Both commands print one JSON object to stdout. The field names below are fixed: reviewer prompts, reports and any tooling that reads this output may rely on them, and a change to a name is a breaking change to the skill. Values in the examples are illustrative.
+
+`image-diff <reference.png> <actual.png>`:
+
+```json
+{
+  "command": "image-diff",
+  "dimensionsMatch": true,
+  "reference": { "width": 1440, "height": 900 },
+  "actual": { "width": 1440, "height": 900 },
+  "totalPixels": 1296000,
+  "diffPixels": 20736,
+  "diffRatio": 0.016,
+  "similarityScore": 98,
+  "alphaChannelIntact": true,
+  "hotspots": [
+    { "gridX": 3, "gridY": 0, "x": 540, "y": 0, "width": 180, "height": 113, "diffRatio": 0.41 }
+  ],
+  "summary": "98/100 similarity; 20736/1296000 pixels differ; 1 hotspot region(s)."
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `command` | Always `"image-diff"`. |
+| `dimensionsMatch` | `false` means the two PNGs differ in size; fix the capture before reading anything else. |
+| `reference`, `actual` | `{width, height}` of each input in pixels. |
+| `totalPixels`, `diffPixels` | Pixels compared, and how many of them differ. |
+| `diffRatio` | `diffPixels / totalPixels`, from 0 to 1. |
+| `similarityScore` | 0-100, higher is closer. |
+| `alphaChannelIntact` | `false` flags transparency lost or replaced by an opaque fill. |
+| `hotspots[]` | Grid cells with differences, worst first. Each has `gridX`, `gridY` (cell index), `x`, `y`, `width`, `height` (cell rectangle in pixels) and its own `diffRatio`. |
+| `summary` | One human-readable line. |
+
+`tui-check <capture.txt> --cols <N>`:
+
+```json
+{
+  "command": "tui-check",
+  "expectedColumns": 80,
+  "lineCount": 24,
+  "lineWidths": [80, 80, 82, 80],
+  "maxWidth": 82,
+  "overflowLines": [{ "line": 3, "width": 82 }],
+  "borderMisaligned": true,
+  "wideCharColumns": [12, 14],
+  "hasAnsi": false,
+  "summary": "24 line(s); max width 82/80; 1 overflow line(s); borders misaligned."
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `command` | Always `"tui-check"`. |
+| `expectedColumns` | The `--cols` value the capture was checked against. |
+| `lineCount`, `lineWidths[]` | Number of lines, and the display width of each (CJK cells count as 2, ANSI escapes as 0). |
+| `maxWidth` | Widest line. Above `expectedColumns` means overflow. |
+| `overflowLines[]` | Each line wider than `expectedColumns`, as `{line, width}` (1-based line number). |
+| `borderMisaligned` | `true` when box-drawing borders do not line up from row to row. |
+| `wideCharColumns[]` | Columns where wide characters were found; the first place to look for drift. |
+| `hasAnsi` | `true` when the input still contains escape sequences. |
+| `summary` | One human-readable line. |
+
+### Script numbers are evidence, not the verdict
+
+The scripts count pixels and columns. They cannot tell whether a surface is built on a real design system or is a pasted image, whether its controls work, whether its required content is there, or whether it does what the user meant. A 99/100 `similarityScore` is compatible with a raster fake, a dead button or clipped CJK descenders, and a zero-overflow `tui-check` says nothing about whether the right panes are shown. Use the numbers to point reviewers at regions and lines worth inspecting, and paste them into every reviewer prompt. The verdict comes only from the merged reviewer report in Step 4; a clean script run never closes the gate on its own, and a noisy one (for example an animation caught mid-frame) never fails it on its own.
 
 ### Motion and interaction capture
 
@@ -120,7 +212,7 @@ This is the platform baseline, distilled from Apple's Human Interface Guidelines
 **A. Layout and alignment**
 - A1 Content is anchored by intent, centred or on the layout grid; nothing sits in the top-left of an otherwise empty canvas.
 - A2 Backgrounds and scrolling layouts run full-bleed to the display edges; no stray inset margin.
-- A3 Margins are symmetric; prose sits in a 65-75 character measure on desktop and at least 45 on a phone.
+- A3 Margins are symmetric; line length for prose is 65-75 characters at desktop widths, with 45 characters as the phone minimum.
 - A4 (phone) Safe areas respected: bars and content inset for the home indicator, notch and status bar.
 - A5 (phone) Scrollbars are overlay; no reserved right-hand gutter.
 - A6 One scroll owner per region, no nested same-direction scrolling; a sticky or floating bar stays legible over whatever scrolls under it.
@@ -130,7 +222,7 @@ This is the platform baseline, distilled from Apple's Human Interface Guidelines
 - A10 Content that continues out of view shows a cue (partial item, fade, chevron).
 - A11 (mac) Nothing important lives only at the window's bottom edge; the minimum window size keeps toolbar and content legible; the sidebar collapses when the window narrows.
 - A12 (web and app screens; N/A for a TUI, a printed page, or a figure) Layout contract: every changed screen or region has a `Layout:` line (in `DESIGN.md`, or in the change description when the project has none; the `frontend` skill's Brief step); the capture shows that pattern's structure; the logged owner is the region's main scroller in the probe output, every other scroller listed is nested inside it for its own content (a code block, a dropdown, a composer) or is named in the line too; none of the line's anti-patterns appear. A missing line, a different main scroller, an unexplained sibling scroller, or a present anti-pattern is a FAIL; a logged skip still owes the scroll-owner check.
-- A13 Spacing rhythm, read from computed values: the space above a section heading is at least 1.5x the space below it, and the gap between groups is at least 2x the gap inside a group, unless the brief's chosen style route sets its own spacing rhythm and the deviation is recorded in the brief or DESIGN.md, in which case that value is the check (the `frontend` skill's `references/perfection/craft-floor.md`).
+- A13 Vertical rhythm, judged on computed styles. Compare each heading's top spacing with its bottom spacing: the ratio must reach 1.5x. Compare spacing between groups with spacing among one group's items: that ratio must reach 2x. Thresholds come from `references/perfection/craft-floor.md` in the `frontend` skill.
 
 **B. Hierarchy**
 - B1 One primary action per view, in the prominent style (accent on its background, not its glyph); peers differ by style, never by size.
@@ -140,7 +232,7 @@ This is the platform baseline, distilled from Apple's Human Interface Guidelines
 - B5 One or two accents per screen; toolbars and tab bars stay monochrome over colourful content; nothing decorative carries accent.
 - B6 Type hierarchy comes from weight, size and colour, holds in both themes, and uses at most two typefaces.
 - B7 (web and app screens; N/A for a TUI, a printed page, or a figure) The screen matches its brief (the `frontend` skill's Brief step): the named primary action is the single prominent control, priorities 1-3 appear in that order in reading order on the first viewport, and nothing listed under "left out on purpose" is on the screen. A screen built or changed in this session with no brief is a FAIL; a pre-existing screen under audit with no brief is N/A.
-- B8 Type scale floor, read from computed values: each heading step in use (display to h3, and the smallest heading to body) differs by at least 1.25x in size, and body-family roles (lead, body, small, caption, label) that sit closer also differ by weight, colour or case, a display heading stays at or under 6rem, and letter spacing never goes below -0.04em, unless the brief's chosen style route sets its own display scale or tracking (then that value is the check).
+- B8 Type scale, judged on computed styles. Each pair of neighbouring heading levels present on the page, from display down through h3 and then from the last heading level to body, differs in size by 1.25x or more; body-family roles that sit closer (caption, label, small, body, lead) also differ in weight, colour or case; display is at most 6rem; `letter-spacing` is no tighter than -0.04em. When the brief's chosen style route defines its own display scale or tracking, judge against that value instead.
 
 **C. Text and copy**
 - C1 Body text is at least 17 pt-equivalent at 390 (15 pt for secondary text) and 14 px on desktop; no thin weights at small sizes.
@@ -165,7 +257,7 @@ This is the platform baseline, distilled from Apple's Human Interface Guidelines
 - E4 One colour never means two things; status colours are consistent across the surface.
 - E5 Translucent surfaces keep text legible over any scrolled content: blur or vibrancy, not a plain alpha fill.
 - E6 The theme follows the system; an in-app theme control also offers "system".
-- E7 Secondary text on a tinted or coloured surface is a shade of that hue or the foreground at reduced alpha, never neutral gray; a shadow carries a y-offset and a soft blur, never a zero-offset coloured glow unless the brief asked for glowing-border cards (the `frontend` skill's ambience route).
+- E7 Two checks. (a) On a tinted or coloured surface, muted text takes a darker or lighter tone of the surface hue, or the foreground colour with lowered opacity; plain neutral gray there is a FAIL. (b) Shadows need a vertical offset plus a soft blur. A coloured glow with zero offset FAILs, except where the brief requested glowing-border cards through the ambience route of the `frontend` skill.
 
 **F. Consistency and brand**
 - F1 One icon set with one stroke, weight and size; icon weight matches adjacent text; no emoji used as an icon.
@@ -175,13 +267,13 @@ This is the platform baseline, distilled from Apple's Human Interface Guidelines
 - F5 Selected or active state is a wash plus a glyph; focus is a focus-visible ring on fields and a row highlight in lists; no coloured accent side-border marks state.
 - F6 Standard glyphs for standard actions (share, close, back, search, more) in their standard places.
 - F7 Windows, sheets and popovers use system shapes; one sheet or popover at a time; a popover's arrow points at its source; only an alert may appear over a popover.
-- F8 Browser surfaces carry the palette in both themes: text selection, caret, visible scrollbars, focus ring, link underline offset, and tabular numerals in changing or aligned numbers; none shows the browser default (select text and focus a field in the capture to prove it).
-- F9 None of the generated scaffolds: a kicker label above a heading, an icon tile stacked over a heading in a grid of same-size cards, a hero metric with no decision behind it, a card nested in a card, monospace used as a "technical" costume. One the brief or its chosen route asked for, recorded as such, passes.
+- F8 In both themes nothing is left at the browser default: the caret, the selection highlight, the focus ring, every visible scrollbar, the link-underline offset, and tabular figures on numbers that update or line up are all driven by the palette. The capture set must include a text selection and a focused field to prove it.
+- F9 None of these scaffold tells: a kicker over a heading; an icon tile over a heading in a grid of equal cards; an oversized hero number that drives no decision; a card nested in a card; monospace worn as a "technical" costume. Exception: the brief or its selected route asked for it, and that request is logged.
 
-A13, B8, E7, F8 and F9 are adapted from the craft floor of [pbakaus/impeccable](https://github.com/pbakaus/impeccable) (Apache-2.0, Copyright 2025 Paul Bakaus); the license and the list of changes are in the `frontend` skill's `ATTRIBUTION.md` section 6.
+Items A13, B8, E7, F8 and F9 adapt Impeccable's craft-floor reference (Apache-2.0, (c) 2025 Paul Bakaus, https://github.com/pbakaus/impeccable); the licence and the change list are in the `frontend` skill's `ATTRIBUTION.md` section 6.
 
 **G. Motion and feedback**
-- G1 Every animation has a cause - an interaction, a state change, an arrival; no motion on non-interactive elements, no hover that changes nothing, no permanent loop. A background the brief's ambience route asked for may loop on its decorative layer only while in view: it starts from an IntersectionObserver, stops off-screen and on visibilitychange, and paints one static frame under reduced motion (the `frontend` skill's `references/design/ambience-skill.md`).
+- G1 Every animation has a cause - an interaction, a state change, an arrival; no motion on non-interactive elements, no hover that changes nothing, no permanent loop.
 - G2 Transitions keep identity: a surface that resizes or moves animates from its old geometry to the new; exit mirrors entry; nothing reflows under the pointer.
 - G3 Motion is interruptible and never gates input: mid-animation input retargets smoothly and never snaps; nobody waits for an animation to act.
 - G4 Under `prefers-reduced-motion`, positional, scale and depth motion becomes a cross-fade; fades, progress and gesture tracking stay; blur never animates.
@@ -217,16 +309,16 @@ A13, B8, E7, F8 and F9 are adapted from the craft floor of [pbakaus/impeccable](
 
 This independent review is REQUIRED before any "done" claim. Do not self-review inside the main agent and call the UI verified - a self-graded pass is the failure mode this step exists to stop. Dispatch it yourself, every time, without waiting to be told. Give each reviewer the captures for every enumerated page from Step 2, not a sample, tell it the page count so it can confirm none were skipped, and paste the checklist sections it owns verbatim. This dispatch is review round 1 of the budget in Step 4.
 
-Dispatch through your harness's own subagent tool. In OpenCode: `task(subagent_type="oracle", ...)`. In Codex: `multi_agent_v1.spawn_agent({"message": "...", "agent_type": "lazycodex-gate-reviewer", "fork_context": false})` (the code blocks below are written in OpenCode `task(...)` form; translate them to that `spawn_agent` call, putting the full prompt in `message`).
+Dispatch each reviewer with `task`, setting `subagent_type` to your read-only review agent (written as `"reviewer"` below; use whatever name your agent configuration gives the read-only reviewer) and `run_in_background=true`. Put the whole prompt in the call: the reviewer starts with no parent history and must not need any. Reviewers are one-shot: do not run them as `team_*` members or as steps of a long-lived `workflow`, and never re-task a finished reviewer. Every re-review is a new `task` call carrying the new evidence.
 
-Send BOTH calls in a single message so they run concurrently. Each oracle is read-only: it reviews and reports, it cannot modify files. Each returns PASS, REVISE, or FAIL with concrete, located findings. Pass A proves the surface is a real design-system implementation, not a mock-only or faked-image substitute, and judges behaviour and required content: motion, states, keyboard, platform (checklist G-J). Pass B directly opens screenshots and judges what is seen: layout, hierarchy, text, targets, themes, consistency (checklist A-F), reference fidelity, before/after pairs, and CJK.
+Send BOTH calls in a single message so they run concurrently. Each reviewer is read-only: it reviews and reports, it cannot modify files. Each returns PASS, REVISE, or FAIL with concrete, located findings. Pass A proves the surface is a real design-system implementation, not a mock-only or faked-image substitute, and judges behaviour and required content: motion, states, keyboard, platform (checklist G-J). Pass B directly opens screenshots and judges what is seen: layout, hierarchy, text, targets, themes, consistency (checklist A-F), reference fidelity, before/after pairs, and CJK.
 
 Paste evidence directly into each prompt: source code, the plain-text TUI captures, the script JSON, and the screenshot paths plus your described observations for web. Never fork parent history into a reviewer - the message carries everything it needs. Require each finding to be tagged `[product]` (the rendered UI is wrong) or `[evidence]` (the capture artifact is defective - wrong signature, partial compositing, stale file), and each `[product]` finding as `[defect]` (hierarchy, function, accessibility, required content, CJK or layout breakage) or `[taste]` (spacing within the scale, shadow depth, radius, colour preference, copy wording); the loop in Step 4 treats them differently. Under a concrete reference (Step 5) there is no taste: any deviation from the reference, spacing and radius included, is a `[defect]`. The two passes differ in depth by charter, not by any model or effort setting, which cannot be pinned per call.
 
 ### Pass A - Design-system and functional integrity (deeper, strict)
 
 ```
-task(subagent_type="oracle",
+task(subagent_type="reviewer",
   run_in_background=true,
   load_skills=[],
   description="Visual QA pass A: design-system and functional integrity",
@@ -249,7 +341,7 @@ SOURCE CODE:
 {Full source of the UI: components, styles/tokens, layout, render code. Include neighboring files that show existing patterns.}
 
 CAPTURES:
-{Web: actual screenshot path(s) plus your described observations. TUI: paste terminal.txt and terminal-ansi.txt inline.}
+{Web: actual screenshot path(s) plus your described observations. TUI: paste capture.txt and capture-ansi.txt inline.}
 
 SHARED SCRIPT EVIDENCE (reference, not verdict):
 {Paste the image-diff or tui-check JSON. Use alphaChannelIntact for the transparency check.}
@@ -280,13 +372,13 @@ BLOCKING: items that must be fixed; empty if PASS
 ### Pass B - Visual fidelity and CJK precision (focused)
 
 ```
-task(subagent_type="oracle",
+task(subagent_type="reviewer",
   run_in_background=true,
   load_skills=[],
   description="Visual QA pass B: visual fidelity and CJK precision",
   prompt="""
 REVIEW TYPE: VISUAL FIDELITY AND CJK PRECISION (read-only)
-TIER INTENT: Treat this as the focused visual pass. Directly open the screenshots with the image-viewing tool your harness lists (`view_image` on Codex, `look_at`, called as `tool.look_at()` inside an eval cell where it is eval-only, or browser inspection) before judging. Anchor every claim to the script evidence, source code, and captures.
+TIER INTENT: Treat this as the focused visual pass. Directly open the screenshots with the available image-viewing tool (`view_image`, `look_at`, or browser inspection) before judging. Anchor every claim to the script evidence, source code, and captures.
 
 INTENT:
 {What the user requested and the mock or baseline to match.}
@@ -306,7 +398,7 @@ BEFORE/AFTER PAIRS:
 SURFACE: {web | tui | both}
 
 CAPTURES:
-{Web: actual and reference screenshot paths plus your described observations. TUI: paste terminal.txt and terminal-ansi.txt inline.}
+{Web: actual and reference screenshot paths plus your described observations. TUI: paste capture.txt and capture-ansi.txt inline.}
 
 SOURCE CODE:
 {For web: include the rendered text/content, components, typography, layout, and style code. For TUI: include render code that controls wrapping, width, and wide-character handling.}
@@ -322,7 +414,7 @@ USE THE EVIDENCE:
 - TUI (tui-check): inspect maxWidth vs expectedColumns, every overflowLines[] entry, borderMisaligned, and wideCharColumns[].
 
 CHECK:
-1. Checklist sections A-F, item by item, on the 390, 1440 and (for page layouts) 1920 captures in BOTH themes and on the scrolled-to-end shots: PASS, FAIL or N/A with the capture that proves it. Every FAIL is BLOCKING.
+1. Checklist sections A-F, item by item, on the 390 AND 1440 captures in BOTH themes and on the scrolled-to-end shots: PASS, FAIL or N/A with the capture that proves it. Every FAIL is BLOCKING.
 2. When a reference packet exists, compare ACTUAL against REFERENCE pixel-perfectly, region by region: page bounds, header/nav, hero, cards, grids, charts, media, typography, copy, color tokens, radius, shadow, border, icon size, spacing, alignment, scroll position, and state. Anything off beyond unavoidable rasterization/rounding is a finding. The overview text is part of the target: missing or rearranged reference content is a finding even if the screenshot looks plausible.
 3. When before/after pairs exist, judge each pair side by side: the after must show the brief's primary action and priorities more legibly than the before, carry fewer elements without a job, and lose nothing from the required-content list. A pair with no change a reader can point to, or a required input, datum, or copy present in before and missing or merged in after, is a BLOCKING [defect].
 4. CJK precision:
@@ -358,7 +450,7 @@ This is a hard stop rule, not a guideline. The UI is done when ALL of these hold
 - That reviewer judged a FRESH capture of every enumerated page from Step 2 - no stale artifacts, no skipped pages.
 - Every `[defect]` finding is resolved in the rendered output, not merely noted.
 
-The loop is bounded. The initial dual-oracle pass is round 1; each fresh re-review increments it. A low-risk surface (one component, a figure, a report page, a copy change) gets 2 rounds; a product surface gets 3. Record the round count and the wall-clock time per round in the report.
+The loop is bounded. The initial dual-reviewer pass is round 1; each fresh re-review increments it. A low-risk surface (one component, a figure, a report page, a copy change) gets 2 rounds; a product surface gets 3. Record the round count and the wall-clock time per round in the report.
 
 - `[product] [defect]`: fix the source, re-capture the pages the fix touched, and dispatch a FRESH reviewer (never a followup to the previous one - stale reviewer context re-litigates settled findings). This consumes a round.
 - `[product] [taste]`: record it under "Recorded taste findings" and stop; a reviewer that reports only taste has passed the surface. Fix taste only when it rides along with a defect fix that is re-reviewed anyway. A reviewer that reclassifies a recorded taste finding as a defect must say what changed; otherwise it stays taste.
@@ -401,9 +493,9 @@ Rounds: {k} of {budget} ({time per round}). Brief: {primary action; priorities 1
 
 ## Step 5 - Reference-fidelity mode (when the task has a concrete visual target)
 
-Run this step IN ADDITION to Steps 1-4 when the original user task has a concrete visual target: "clone this site", "move this Figma design to code", "rebuild this screen", "make it look exactly like X", or "build this Imagen/Stitch/generated mockup and overview". For these tasks the normal dual-oracle is necessary but NOT sufficient. After it returns, run the following TWO additional MANDATORY verifications; their retries count against the same round budget as Step 4.
+Run this step IN ADDITION to Steps 1-4 when the original user task has a concrete visual target: "clone this site", "move this Figma design to code", "rebuild this screen", "make it look exactly like X", or "build this Imagen/Stitch/generated mockup and overview". For these tasks the normal dual-reviewer pass is necessary but NOT sufficient. After it returns, run the following TWO additional MANDATORY verifications; their retries count against the same round budget as Step 4.
 
-1. Pixel-perfect design-compare subagent (visual oracle). Dispatch a focused, read-only design-compare reviewer (recommend `gpt-5.6-sol` with xhigh reasoning). It must crop/zoom BOTH the reference (target / Figma export / source-site screenshot / generated page snapshot) and the ACTUAL screenshot into matching regions and read them **pixel-by-pixel** - header, nav, each card, spacing, type ramp, color tokens - not at a glance. It must also compare the overview text or annotations against the rendered content and DOM text. Anchor every claim with the bundled tool:
+1. Pixel-perfect design-compare subagent (visual reviewer). Dispatch a focused, read-only design-compare reviewer with `task`, on the strongest image-capable model you have configured and its highest reasoning setting. It must crop/zoom BOTH the reference (target / Figma export / source-site screenshot / generated page snapshot) and the ACTUAL screenshot into matching regions and read them **pixel-by-pixel** - header, nav, each card, spacing, type ramp, color tokens - not at a glance. It must also compare the overview text or annotations against the rendered content and DOM text. Anchor every claim with the bundled tool:
 
 ```
 node "$SKILL_DIR/scripts/visual-qa.mjs" image-diff <reference.png> <actual.png>
@@ -411,12 +503,10 @@ node "$SKILL_DIR/scripts/visual-qa.mjs" image-diff <reference.png> <actual.png>
 
    It judges whether layout geometry, spacing, design tokens (color, type, radius, shadow), and the design itself are identical to the target, region by region. Anything off by more than rounding is a finding.
 
-2. Code-level design-system fidelity (code oracle). Dispatch through your harness's own subagent tool.
-
-   **OpenCode:**
+2. Code-level design-system fidelity (code reviewer). Dispatch with `task`, as a fresh one-shot reviewer:
 
    `````
-   task(subagent_type="oracle",
+   task(subagent_type="reviewer",
      run_in_background=true,
      load_skills=[],
      description="Clone/design-system fidelity review",
@@ -443,7 +533,6 @@ node "$SKILL_DIR/scripts/visual-qa.mjs" image-diff <reference.png> <actual.png>
    )
    `````
 
-   **Codex:** `multi_agent_v1.spawn_agent({"message":"TASK: Act as a clone / design-system fidelity reviewer. ...","agent_type":"lazycodex-clone-fidelity-reviewer","fork_context":false})`
 
 RULE (mandatory, non-negotiable): the reference-fidelity task is NOT done until BOTH the pixel-compare AND the code-level design-system fidelity reviewer confirm that the **layer structure, the design system, and the design itself** match the target. If EITHER fails, re-implement the gaps and re-run BOTH verifications from the top on the same revision, within the budget; on exhaustion, NEEDS HUMAN REVIEW with the gaps listed. Never declare reference-fidelity complete on a single pass, on visual-only evidence, or on code-only evidence.
 

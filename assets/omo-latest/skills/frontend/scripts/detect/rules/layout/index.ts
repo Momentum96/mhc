@@ -15,18 +15,7 @@ import { unbalancedHeading } from "./unbalanced-heading"
 import { viewportReflow } from "./viewport-reflow"
 
 export const LAYOUT_RULES: readonly Rule[] = [
-  nestedCards,
-  monotonousSpacing,
-  edgeFlushCards,
-  textOcclusion,
-  firstViewportColumnOverflow,
-  crampedPadding,
-  bodyTextViewportEdge,
-  textOverflow,
-  clippedOverflowContainer,
-  headingRhythm,
-  straggler,
-  unbalancedHeading,
-  contentHiddenAtRest,
-  viewportReflow,
+	nestedCards, monotonousSpacing, edgeFlushCards, textOcclusion, firstViewportColumnOverflow,
+	crampedPadding, bodyTextViewportEdge, textOverflow, clippedOverflowContainer, headingRhythm,
+	straggler, unbalancedHeading, contentHiddenAtRest, viewportReflow,
 ]

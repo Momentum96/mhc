@@ -10,13 +10,6 @@ import { skippedHeading } from "./skipped-heading"
 import { theaterSlopPhrase } from "./theater-slop-phrase"
 
 export const COPY_RULES: readonly PageRule[] = [
-  emDashOveruse,
-  marketingBuzzword,
-  aphoristicCadence,
-  theaterSlopPhrase,
-  numberedSectionLabels,
-  repeatedContainerText,
-  skippedHeading,
-  brokenImage,
-  scriptError,
+	emDashOveruse, marketingBuzzword, aphoristicCadence, theaterSlopPhrase, numberedSectionLabels,
+	repeatedContainerText, skippedHeading, brokenImage, scriptError,
 ]
