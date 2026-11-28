@@ -1467,7 +1467,7 @@ pub fn host_runtime_factory_with_mcp_registry(
                     .initial_thinking_level
                     .clone()
                     .or_else(|| config.thinking.clone())
-                    .and_then(|level| maho_ai::types::ThinkingLevel::parse(&level));
+                    .and_then(|level| maho_ai::types::ModelThinkingLevel::parse(&level));
                 let creation_model = profile
                     .runtime
                     .creation_model
@@ -1530,10 +1530,16 @@ pub fn host_runtime_factory_with_mcp_registry(
                     session_manager: Some(session_manager),
                     session_start_event,
                     model: initial.model,
-                    thinking_level: thinking.or(initial
-                        .thinking_level
-                        .and_then(|level| maho_ai::types::ThinkingLevel::parse(level.as_str()))),
-                    thinking_selection: initial.thinking_selection,
+                    thinking_level: thinking
+                        .or(initial.thinking_level)
+                        .and_then(|level| maho_ai::types::ThinkingLevel::parse(level.as_str())),
+                    thinking_selection: thinking
+                        .map(|level| maho_ai::types::ThinkingSelection {
+                            level,
+                            source: maho_ai::types::ThinkingSelectionSource::Explicit,
+                            legacy_variant_id: None,
+                        })
+                        .or(initial.thinking_selection),
                     scoped_models: super::startup::session_model_entries(scoped.scoped_models)?,
                     auto_title_sessions: profile.runtime.auto_title.or(config.auto_title_sessions),
                     session_profile: maho_ext_api::ExtensionSessionProfile {
@@ -1622,7 +1628,7 @@ pub struct CliInitialModel {
 
 pub async fn resolve_cli_initial_model(
     creation_model: Option<(String, String)>,
-    thinking: Option<maho_ai::types::ThinkingLevel>,
+    thinking: Option<maho_ai::types::ModelThinkingLevel>,
     is_continuing: bool,
     settings: &SettingsManager,
     model_runtime: &ModelRuntime,
@@ -1640,7 +1646,7 @@ pub async fn resolve_cli_initial_model(
         let resolved = maho_core::model_resolver::resolve_cli_model(
             Some(provider.as_str()),
             Some(model_id.as_str()),
-            thinking.map(Into::into),
+            thinking,
             model_runtime,
         );
         return Ok(CliInitialModel {

@@ -5,6 +5,7 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+use maho_ai::types::ModelThinkingLevel;
 use maho_rpc::host_launch_spec::{
     HostLaunchSpecError, default_host_launch_spec, load_host_launch_spec,
 };
@@ -17,9 +18,9 @@ use maho_rpc::host_session_wait::{HostSessionWait, WaitUntil};
 
 const USAGE: &str = "usage: {app} host session <command> [--socket <path>] [--rpc-key-root <dir>] [--json]
 
-  open --cwd <dir> [--model <provider/id>] [--name <text>] [--prompt <text|@file>] [--launch-spec <file>]
+  open --cwd <dir> [--model <provider/id[:thinking]>] [--name <text>] [--prompt <text|@file>] [--launch-spec <file>]
   close <ref>
-  model <ref> <provider/id>
+  model <ref> <provider/id[:thinking]>
   prompt <ref> <text|@file>
   steer <ref> <text|@file>
   abort <ref>
@@ -234,14 +235,21 @@ pub fn parse_host_session_args(args: &[String]) -> Result<ParsedHostSessionArgs,
 }
 
 fn parse_model(text: &str) -> Result<HostSessionModel, String> {
-    let parts = text.split('/').collect::<Vec<_>>();
-    match parts.as_slice() {
-        [provider, id] if !provider.is_empty() && !id.is_empty() => Ok(HostSessionModel {
-            provider: (*provider).to_owned(),
-            id: (*id).to_owned(),
-        }),
-        _ => Err("Model must be provider/id.".to_owned()),
+    let Some((provider, id)) = text.split_once('/') else {
+        return Err("Model must be provider/id.".to_owned());
+    };
+    let (id, thinking) = id
+        .rsplit_once(':')
+        .and_then(|(id, suffix)| ModelThinkingLevel::parse(suffix).map(|level| (id, Some(level))))
+        .unwrap_or((id, None));
+    if provider.is_empty() || id.is_empty() {
+        return Err("Model must be provider/id.".to_owned());
     }
+    Ok(HostSessionModel {
+        provider: provider.to_owned(),
+        id: id.to_owned(),
+        thinking,
+    })
 }
 
 /// A decimal integer at least `minimum` and within JavaScript's safe range (senpi `integer`).
@@ -438,6 +446,7 @@ mod tests {
         HostSessionModel {
             provider: "anthropic".into(),
             id: "mock".into(),
+            thinking: None,
         }
     }
 
@@ -541,13 +550,47 @@ mod tests {
     }
 
     #[test]
+    fn keeps_slashes_inside_host_model_ids() {
+        for (selector, id, thinking) in [
+            ("magpie/group/x", "group/x", None),
+            (
+                "magpie/group/x:medium",
+                "group/x",
+                Some(ModelThinkingLevel::Medium),
+            ),
+            ("magpie/codex/gpt-6.2-sol", "codex/gpt-6.2-sol", None),
+            ("magpie/group/x:preview", "group/x:preview", None),
+        ] {
+            let expected = HostSessionModel {
+                provider: "magpie".into(),
+                id: id.into(),
+                thinking,
+            };
+            let parsed = parse(&["open", "--cwd", ".", "--model", selector]);
+            let HostSessionCommand::Open(open) = parsed.command else {
+                panic!("expected open command");
+            };
+            assert_eq!(open.model.as_ref(), Some(&expected));
+            assert_eq!(
+                parse(&["model", "rpc-1", selector]).command,
+                HostSessionCommand::Model {
+                    reference: "rpc-1".into(),
+                    model: expected,
+                }
+            );
+        }
+    }
+
+    #[test]
     fn rejects_invalid_argv() {
         for args in [
             &[][..],
             &["bogus"],
             &["open"],
             &["open", "--cwd", ".", "--model", "foo"],
-            &["model", "ref", "p/a/b"],
+            &["model", "ref", "/id"],
+            &["model", "ref", "provider/"],
+            &["model", "ref", "provider/:medium"],
             &["read", "ref", "--tail", "0"],
             &["read", "ref", "--tail", "1.2"],
             &["wait", "ref", "--until", "later"],

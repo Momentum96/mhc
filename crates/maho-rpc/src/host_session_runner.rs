@@ -16,6 +16,7 @@ use crate::rpc_client::{
     ListSessionsOptions, RpcClient, RpcClientError, RpcClientOptions, is_transport_gone_error,
     prompt_disposition_name,
 };
+use maho_ai::types::ModelThinkingLevel;
 use serde_json::{Map, Value, json};
 use std::collections::{BTreeMap, HashMap};
 use std::time::Duration;
@@ -25,6 +26,7 @@ use std::time::Duration;
 pub struct HostSessionModel {
     pub provider: String,
     pub id: String,
+    pub thinking: Option<ModelThinkingLevel>,
 }
 
 /// senpi `HostSessionOpen`: what an `open` asks for.
@@ -406,18 +408,33 @@ async fn act(
         HostSessionAction::Model { model, .. } => {
             // set_model also persists the GLOBAL default. Smaller contexts may defer the switch.
             client.set_model(&model.provider, &model.id).await?;
-            let state = client.get_state().await?;
+            let mut state = client.get_state().await?;
+            if let Some(level) = model.thinking
+                && state["pendingModelSwitch"].is_null()
+                && state["model"]["provider"] == model.provider.as_str()
+                && state["model"]["id"] == model.id.as_str()
+            {
+                client
+                    .set_thinking_level(level.as_str(), Some("turn"))
+                    .await?;
+                state = client.get_state().await?;
+            }
             let current = match state.get("model").filter(|model| model.is_object()) {
                 Some(model) => json!({"provider": model["provider"], "id": model["id"]}),
                 None => Value::Null,
             };
-            ok(json!({
+            let mut payload = json!({
                 "action": "model",
                 "sessionId": sid,
                 "requested": {"provider": model.provider, "id": model.id},
                 "model": current,
                 "pendingModelSwitch": state.get("pendingModelSwitch").cloned().unwrap_or(Value::Null),
-            }))
+            });
+            if let Some(level) = model.thinking {
+                payload["requested"]["thinkingLevel"] = level.as_str().into();
+                payload["thinkingLevel"] = state["thinkingLevel"].clone();
+            }
+            ok(payload)
         }
         HostSessionAction::List => {
             let sessions = client
@@ -560,6 +577,9 @@ pub async fn open_host_session(
     if let Some(model) = &request.model {
         options["provider"] = model.provider.as_str().into();
         options["modelId"] = model.id.as_str().into();
+        if let Some(level) = model.thinking {
+            options["thinkingLevel"] = level.as_str().into();
+        }
     }
     let opened = client.open_session(options).await?;
     let state = &opened["state"];
@@ -1202,6 +1222,7 @@ mod tests {
                 model: HostSessionModel {
                     provider: "anthropic".into(),
                     id: id.into(),
+                    thinking: None,
                 },
             })
         };
